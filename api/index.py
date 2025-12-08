@@ -12,7 +12,24 @@ if not apiKey:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 client = OpenAI(api_key=apiKey)
 
-app = FastAPI(title="TreatOrHell")
+app = FastAPI(
+    title="TreatOrHell",
+    version="0.1.0",
+    description=(
+        "TreatOrHell – a playful API where celestial beings judge CVs. "
+        "Provides chat-style endpoints for 'angel' feedback on candidate profiles."
+    ),
+    contact={
+        "name": "Don Branson",
+        "url": "https://github.com/donbr",
+        "email": "you@example.com",
+    },
+    servers=[
+        {"url": "http://localhost:8000", "description": "Local dev server"},
+        # Add prod if you have it:
+        # {"url": "https://treatorhell.example.com", "description": "Production"},
+    ],
+)
 
 
 class ChatRequest(BaseModel):
@@ -23,7 +40,12 @@ class ChatResponse(BaseModel):
     response: str
 
 
-@app.get("/")
+@app.get(
+    "/",
+    summary="Service health check",
+    description="Returns a simple status message confirming that TreatOrHell is up.",
+    tags=["meta"],
+)
 def root():
     return {
         "message": "TreatOrHell API",
@@ -32,7 +54,16 @@ def root():
     }
 
 
-@app.post("/chat/angel", response_model=ChatResponse)
+@app.post(
+    "/chat/angel",
+    summary="Ask the Angel for CV feedback",
+    description=(
+        "Send a message to the Angel reviewer (e.g. candidate CV text or summary). "
+        "The Angel responds with constructive, kind feedback."
+    ),
+    tags=["chat", "angel-review"],
+    response_model=ChatResponse,
+)
 def chatAngel(request: ChatRequest):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
