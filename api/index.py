@@ -29,6 +29,20 @@ app = FastAPI(
         # Add prod if you have it:
         # {"url": "https://treatorhell.example.com", "description": "Production"},
     ],
+    openapi_tags=[
+        {
+            "name": "meta",
+            "description": "Meta endpoints for service health and information.",
+        },
+        {
+            "name": "chat",
+            "description": "Chat endpoints for interacting with AI personas.",
+        },
+        {
+            "name": "angel-review",
+            "description": "Endpoints for getting feedback from the Angel reviewer.",
+        },
+    ],
 )
 
 
