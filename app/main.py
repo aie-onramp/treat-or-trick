@@ -29,6 +29,7 @@ app = FastAPI(
         "email": "you@example.com",
     },
     servers=[
+        {"url": "https://treat-or-trick.vercel.app", "description": "Production server"},
         {"url": "http://localhost:8000", "description": "Local dev server"},
     ],
     openapi_tags=[
