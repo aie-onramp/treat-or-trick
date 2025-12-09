@@ -2,6 +2,8 @@
 
 A FastAPI application that provides an LLM-powered chat endpoint featuring an overly emotional, sparkly Angel persona. The Angel responds with dramatic, positive, and hopeful messages full of tears and glitter.
 
+**Live Demo**: https://treat-or-trick.vercel.app/
+
 ## Features
 
 - **Angel Chat Endpoint**: POST `/chat/angel` - Chat with an emotional, sparkly Angel
@@ -73,12 +75,30 @@ uvicorn api.index:app --reload --host 0.0.0.0 --port 8000
 
 1. Visit `http://localhost:8000` - Root endpoint with API information
 2. Visit `http://localhost:8000/docs` - Swagger UI for interactive API testing
-3. Test the Angel chat endpoint:
+3. Visit `http://localhost:8000/questions` - Student questions form
+4. Test the Angel chat endpoint:
    ```bash
    curl -X POST "http://localhost:8000/chat/angel" \
         -H "Content-Type: application/json" \
         -d '{"message": "I forgot to do my homework!"}'
    ```
+
+### Test the Live Deployment
+
+The application is deployed at https://treat-or-trick.vercel.app/
+
+| Endpoint | URL |
+|----------|-----|
+| API Root | https://treat-or-trick.vercel.app/ |
+| Swagger Docs | https://treat-or-trick.vercel.app/docs |
+| Questions Form | https://treat-or-trick.vercel.app/questions |
+
+Test the live Angel chat:
+```bash
+curl -X POST "https://treat-or-trick.vercel.app/chat/angel" \
+     -H "Content-Type: application/json" \
+     -d '{"message": "I forgot to do my homework!"}'
+```
 
 ## API Endpoints
 
@@ -164,12 +184,14 @@ vercel --prod
 2. Navigate to **Settings** → **Environment Variables**
 3. Add the following variables:
    - `OPENAI_API_KEY` - Your OpenAI API key
-   - `KV_REST_API_URL` - Your Upstash Redis REST API URL
-   - `KV_REST_API_TOKEN` - Your Upstash Redis token
-   - `KV_REST_API_READ_ONLY_TOKEN` - Your Upstash Redis read-only token (optional)
+   - Upstash Redis credentials (either naming convention works):
+     - `UPSTASH_KV_REST_API_URL` or `KV_REST_API_URL` - Your Upstash Redis REST API URL
+     - `UPSTASH_KV_REST_API_TOKEN` or `KV_REST_API_TOKEN` - Your Upstash Redis token
 4. Redeploy if necessary
 
-### 4. Test Deployed Endpoint
+**Note**: If you connect Upstash via Vercel Marketplace, the `UPSTASH_*` prefixed variables are set automatically.
+
+### 5. Test Deployed Endpoint
 
 Visit your Vercel URL and test the endpoints. The API should work the same as locally.
 
