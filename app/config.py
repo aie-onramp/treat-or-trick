@@ -30,6 +30,11 @@ class Settings(BaseSettings):
         "Provides chat-style endpoints for 'angel' feedback on candidate profiles."
     )
 
+    # Upstash Redis Configuration (for Vercel deployment)
+    kv_rest_api_url: str | None = None
+    kv_rest_api_token: str | None = None
+    kv_rest_api_read_only_token: str | None = None
+
 
 settings = Settings()
 

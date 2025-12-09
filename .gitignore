@@ -1,5 +1,6 @@
 # Environment variables
 .env
+.env.development.local
 
 # Python cache
 __pycache__/
@@ -20,3 +21,10 @@ ENV/
 # Vercel
 .vercel/
 
+.vercel
+
+# Student responses data file (local development)
+app/data/student_responses.txt
+
+# Playwright MCP screenshots
+.playwright-mcp/

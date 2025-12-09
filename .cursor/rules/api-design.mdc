@@ -1,0 +1,445 @@
+---
+description: Schema-first API design patterns with FastAPI and OpenAPI
+globs: ["**/api/**/*.py", "**/routes/**/*.py", "**/endpoints/**/*.py"]
+alwaysApply: false
+---
+
+# API Design Standards
+
+## Core Philosophy: Schema-First Development
+
+**ALWAYS design in this order:**
+
+1. **Define Pydantic Schemas** → Data contracts before implementation
+2. **Document Endpoint** → OpenAPI metadata (summary, description, responses)
+3. **Implement Handler** → Code that matches the schema
+4. **Visualize Complex Flows** → Mermaid diagrams for multi-step operations
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  1. Schema      │────▶│  2. OpenAPI     │────▶│  3. Implement   │
+│  (Pydantic)     │     │  (Metadata)     │     │  (Handler)      │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+---
+
+## 1. Pydantic Schema Patterns
+
+### Base Schema with Shared Config
+
+```python
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict
+
+class BaseSchema(BaseModel):
+    """Base schema with common configuration."""
+    
+    model_config = ConfigDict(
+        from_attributes=True,  # Enable ORM mode
+        str_strip_whitespace=True,  # Strip whitespace from strings
+        validate_assignment=True,  # Validate on attribute assignment
+    )
+
+class TimestampMixin(BaseModel):
+    """Mixin for created/updated timestamps."""
+    created_at: datetime
+    updated_at: datetime
+```
+
+### CRUD Schema Pattern
+
+```python
+from pydantic import BaseModel, Field, EmailStr
+from datetime import datetime
+
+# Base: Shared fields
+class UserBase(BaseModel):
+    """Shared user fields."""
+    email: EmailStr
+    name: str = Field(min_length=1, max_length=100)
+    is_active: bool = True
+
+# Create: Fields required for creation (no ID)
+class UserCreate(UserBase):
+    """Schema for creating a user."""
+    password: str = Field(min_length=8, max_length=100)
+
+# Update: All fields optional for partial updates
+class UserUpdate(BaseModel):
+    """Schema for updating a user (all fields optional)."""
+    email: EmailStr | None = None
+    name: str | None = Field(None, min_length=1, max_length=100)
+    is_active: bool | None = None
+    password: str | None = Field(None, min_length=8, max_length=100)
+
+# Response: Fields returned to client (includes ID, excludes password)
+class UserResponse(UserBase):
+    """Schema for user response."""
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# List response with pagination
+class UserListResponse(BaseModel):
+    """Paginated list of users."""
+    items: list[UserResponse]
+    total: int
+    page: int
+    page_size: int
+    has_more: bool
+```
+
+### Nested Schema Pattern
+
+```python
+class AddressSchema(BaseModel):
+    """Address schema for embedding."""
+    street: str
+    city: str
+    state: str
+    zip_code: str = Field(pattern=r"^\d{5}(-\d{4})?$")
+    country: str = "US"
+
+class CompanyResponse(BaseModel):
+    """Company with nested address."""
+    id: str
+    name: str
+    address: AddressSchema
+    employees: list[UserResponse]
+```
+
+---
+
+## 2. RESTful Endpoint Conventions
+
+### HTTP Methods & Status Codes
+
+| Method | Purpose | Success Code | Error Codes |
+|--------|---------|--------------|-------------|
+| GET | Retrieve resource(s) | 200 | 404, 400 |
+| POST | Create resource | 201 | 400, 409 |
+| PUT | Replace resource | 200 | 400, 404 |
+| PATCH | Partial update | 200 | 400, 404 |
+| DELETE | Remove resource | 204 | 404 |
+
+### URL Structure
+
+```python
+# Collection endpoints
+GET    /api/v1/users          # List users
+POST   /api/v1/users          # Create user
+
+# Resource endpoints
+GET    /api/v1/users/{id}     # Get user
+PUT    /api/v1/users/{id}     # Replace user
+PATCH  /api/v1/users/{id}     # Update user
+DELETE /api/v1/users/{id}     # Delete user
+
+# Nested resources
+GET    /api/v1/users/{id}/orders      # List user's orders
+POST   /api/v1/users/{id}/orders      # Create order for user
+
+# Actions (when CRUD doesn't fit)
+POST   /api/v1/users/{id}/activate    # Activate user
+POST   /api/v1/users/{id}/deactivate  # Deactivate user
+```
+
+---
+
+## 3. FastAPI Endpoint Implementation
+
+### Full CRUD Example with OpenAPI Metadata
+
+```python
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from app.models.user import UserCreate, UserUpdate, UserResponse, UserListResponse
+from app.services.user_service import UserService
+from app.dependencies import get_user_service
+
+router = APIRouter(prefix="/users", tags=["Users"])
+
+@router.get(
+    "",
+    response_model=UserListResponse,
+    summary="List users",
+    description="Retrieve a paginated list of users with optional filtering.",
+    responses={
+        200: {"description": "List of users retrieved successfully"},
+        400: {"description": "Invalid query parameters"},
+    }
+)
+async def list_users(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    is_active: bool | None = Query(None, description="Filter by active status"),
+    search: str | None = Query(None, description="Search by name or email"),
+    service: UserService = Depends(get_user_service)
+) -> UserListResponse:
+    """List users with pagination and filtering."""
+    return await service.list_users(
+        page=page,
+        page_size=page_size,
+        is_active=is_active,
+        search=search
+    )
+
+@router.post(
+    "",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create user",
+    description="Create a new user with the provided information.",
+    responses={
+        201: {"description": "User created successfully"},
+        400: {"description": "Invalid user data"},
+        409: {"description": "User with this email already exists"},
+    }
+)
+async def create_user(
+    user_data: UserCreate,
+    service: UserService = Depends(get_user_service)
+) -> UserResponse:
+    """Create a new user."""
+    return await service.create_user(user_data)
+
+@router.get(
+    "/{user_id}",
+    response_model=UserResponse,
+    summary="Get user",
+    description="Retrieve a specific user by their ID.",
+    responses={
+        200: {"description": "User retrieved successfully"},
+        404: {"description": "User not found"},
+    }
+)
+async def get_user(
+    user_id: str,
+    service: UserService = Depends(get_user_service)
+) -> UserResponse:
+    """Get a user by ID."""
+    user = await service.get_user(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found"
+        )
+    return user
+
+@router.patch(
+    "/{user_id}",
+    response_model=UserResponse,
+    summary="Update user",
+    description="Partially update a user's information.",
+    responses={
+        200: {"description": "User updated successfully"},
+        400: {"description": "Invalid update data"},
+        404: {"description": "User not found"},
+    }
+)
+async def update_user(
+    user_id: str,
+    user_data: UserUpdate,
+    service: UserService = Depends(get_user_service)
+) -> UserResponse:
+    """Update a user's information."""
+    user = await service.update_user(user_id, user_data)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found"
+        )
+    return user
+
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete user",
+    description="Permanently delete a user.",
+    responses={
+        204: {"description": "User deleted successfully"},
+        404: {"description": "User not found"},
+    }
+)
+async def delete_user(
+    user_id: str,
+    service: UserService = Depends(get_user_service)
+) -> None:
+    """Delete a user."""
+    deleted = await service.delete_user(user_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found"
+        )
+```
+
+---
+
+## 4. Error Response Schema
+
+### Standardized Error Format
+
+```python
+from pydantic import BaseModel
+
+class ErrorDetail(BaseModel):
+    """Individual error detail."""
+    loc: list[str] | None = None  # Location of error
+    msg: str  # Error message
+    type: str  # Error type
+
+class ErrorResponse(BaseModel):
+    """Standardized error response."""
+    error: str  # Error code (e.g., "validation_error", "not_found")
+    message: str  # Human-readable message
+    details: list[ErrorDetail] | None = None  # Additional details
+
+# Register in OpenAPI responses
+@router.get(
+    "/{item_id}",
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Item not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": "not_found",
+                        "message": "Item with ID 'abc123' not found",
+                        "details": None
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_item(item_id: str):
+    ...
+```
+
+### Exception Handler
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            error=exc.detail.get("error", "error") if isinstance(exc.detail, dict) else "error",
+            message=exc.detail.get("message", str(exc.detail)) if isinstance(exc.detail, dict) else str(exc.detail),
+            details=exc.detail.get("details") if isinstance(exc.detail, dict) else None
+        ).model_dump()
+    )
+```
+
+---
+
+## 5. Query Parameters for Collections
+
+```python
+from enum import Enum
+from fastapi import Query
+
+class SortOrder(str, Enum):
+    asc = "asc"
+    desc = "desc"
+
+class UserSortField(str, Enum):
+    name = "name"
+    email = "email"
+    created_at = "created_at"
+
+@router.get("/users")
+async def list_users(
+    # Pagination
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    
+    # Sorting
+    sort_by: UserSortField = Query(UserSortField.created_at, description="Field to sort by"),
+    sort_order: SortOrder = Query(SortOrder.desc, description="Sort order"),
+    
+    # Filtering
+    is_active: bool | None = Query(None, description="Filter by active status"),
+    created_after: datetime | None = Query(None, description="Filter by creation date"),
+    
+    # Search
+    q: str | None = Query(None, min_length=2, description="Search query"),
+):
+    ...
+```
+
+---
+
+## 6. Visualize Complex Flows
+
+For multi-step operations, create a Mermaid diagram BEFORE implementing:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant AuthService
+    participant UserService
+    participant Database
+    participant EmailService
+
+    Client->>API: POST /users
+    API->>AuthService: Validate token
+    AuthService-->>API: Token valid
+    API->>UserService: Create user
+    UserService->>Database: Check email exists
+    Database-->>UserService: Email available
+    UserService->>Database: Insert user
+    Database-->>UserService: User created
+    UserService->>EmailService: Send welcome email
+    EmailService-->>UserService: Email queued
+    UserService-->>API: UserResponse
+    API-->>Client: 201 Created
+```
+
+---
+
+## 7. API Versioning
+
+### URL Path Versioning (Recommended)
+
+```python
+from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+
+# Version 1
+v1_router = APIRouter(prefix="/api/v1")
+v1_router.include_router(users_v1.router)
+v1_router.include_router(items_v1.router)
+
+# Version 2
+v2_router = APIRouter(prefix="/api/v2")
+v2_router.include_router(users_v2.router)
+v2_router.include_router(items_v2.router)
+
+app.include_router(v1_router)
+app.include_router(v2_router)
+```
+
+---
+
+## DO NOT
+
+- ❌ Skip Pydantic schemas and return raw dicts
+- ❌ Use generic status codes (always use specific codes)
+- ❌ Forget OpenAPI metadata (summary, description, responses)
+- ❌ Mix singular/plural in URLs inconsistently
+- ❌ Return different response shapes for the same endpoint
+- ❌ Expose internal IDs or sensitive data in responses
+- ❌ Skip input validation (let Pydantic handle it)
+- ❌ Implement before designing schemas

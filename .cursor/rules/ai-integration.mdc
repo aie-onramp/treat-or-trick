@@ -1,0 +1,535 @@
+---
+description: AI/LLM integration patterns using PydanticAI, OpenAI SDK, and structured outputs
+globs: ["**/agents/**/*.py", "**/ai/**/*.py", "**/*_agent.py", "**/llm/**/*.py"]
+alwaysApply: false
+---
+
+# AI Integration Standards
+
+## Library Selection Guide
+
+| Use Case | Library | When to Use |
+|----------|---------|-------------|
+| **Type-safe agents** | `pydantic-ai` | Default choice for structured agent output |
+| **Direct API access** | `openai` | Simple completions, embeddings, fine-tuning |
+| **Complex multi-agent** | `openai-agents-sdk` | Handoffs, specialized agent routing |
+| **Streaming UI** | `ai-sdk` (Vercel) | Real-time streaming to frontend |
+
+## Token Cost Reference
+
+| Model | Input (per 1K) | Output (per 1K) |
+|-------|----------------|-----------------|
+| gpt-4o | $0.0025 | $0.01 |
+| gpt-4o-mini | $0.00015 | $0.0006 |
+| claude-3.5-sonnet | $0.003 | $0.015 |
+| claude-3.5-haiku | $0.0008 | $0.004 |
+
+---
+
+## 1. PydanticAI Agents (Recommended Default)
+
+### Basic Agent with Structured Output
+
+```python
+from pydantic import BaseModel, Field
+from pydantic_ai import Agent
+
+class AnalysisResult(BaseModel):
+    """Structured output from analysis agent."""
+    summary: str = Field(description="Brief summary of findings")
+    sentiment: str = Field(description="Overall sentiment: positive, negative, neutral")
+    confidence: float = Field(ge=0, le=1, description="Confidence score")
+    key_points: list[str] = Field(description="Key points extracted")
+
+# Create typed agent
+analysis_agent = Agent(
+    "openai:gpt-4o",
+    output_type=AnalysisResult,
+    system_prompt=(
+        "You are an expert analyst. Analyze the provided content "
+        "and return structured insights."
+    )
+)
+
+# Usage
+async def analyze_content(content: str) -> AnalysisResult:
+    result = await analysis_agent.run(content)
+    return result.data  # Fully typed AnalysisResult
+```
+
+### Typed Dependencies (REQUIRED PATTERN)
+
+**CRITICAL**: Always use a typed `deps_type` dataclass instead of raw dicts.
+
+```python
+from dataclasses import dataclass
+from pydantic_ai import Agent, RunContext
+
+# ✅ CORRECT: Typed dependencies class
+@dataclass
+class AgentDeps:
+    """Typed dependencies for agent tools."""
+    db: Database
+    user_id: str
+    config: AppConfig
+    graphiti: Graphiti | None = None
+
+# Create agent with typed deps
+support_agent = Agent(
+    "openai:gpt-4o",
+    deps_type=AgentDeps,  # Enables type checking in tools
+    system_prompt="You are a helpful support assistant."
+)
+
+@support_agent.tool
+async def get_user_orders(ctx: RunContext[AgentDeps]) -> list[dict]:
+    """Fetch user's order history."""
+    # ctx.deps is fully typed! IDE autocomplete works
+    orders = await ctx.deps.db.get_orders(ctx.deps.user_id)
+    return [order.model_dump() for order in orders]
+
+@support_agent.tool
+async def search_knowledge(ctx: RunContext[AgentDeps], query: str) -> str:
+    """Search knowledge base for relevant information."""
+    if ctx.deps.graphiti is None:
+        return "Knowledge base not available"
+    
+    results = await ctx.deps.graphiti.search(
+        query=query,
+        group_ids=[ctx.deps.user_id],
+        num_results=5
+    )
+    return "\n".join([edge.fact for edge in results])
+
+# Usage with typed deps
+async def handle_support_request(
+    message: str,
+    user_id: str,
+    db: Database,
+    graphiti: Graphiti
+) -> str:
+    deps = AgentDeps(
+        db=db,
+        user_id=user_id,
+        config=get_config(),
+        graphiti=graphiti
+    )
+    
+    result = await support_agent.run(message, deps=deps)
+    return result.data
+
+# ❌ AVOID: Untyped deps dict
+# db = ctx.deps["database"]  # No autocomplete, no type checking
+```
+
+### Agent with Dynamic System Prompt
+
+```python
+from pydantic_ai import Agent, RunContext
+
+@dataclass
+class PersonalizedDeps:
+    user_name: str
+    user_preferences: dict
+    db: Database
+
+personalized_agent = Agent(
+    "openai:gpt-4o",
+    deps_type=PersonalizedDeps
+)
+
+@personalized_agent.system_prompt
+async def build_system_prompt(ctx: RunContext[PersonalizedDeps]) -> str:
+    """Dynamic system prompt based on user context."""
+    prefs = ctx.deps.user_preferences
+    return f"""You are a personal assistant for {ctx.deps.user_name}.
+
+User preferences:
+- Communication style: {prefs.get('style', 'professional')}
+- Expertise level: {prefs.get('expertise', 'intermediate')}
+- Preferred language: {prefs.get('language', 'English')}
+
+Adapt your responses accordingly."""
+```
+
+### Multi-Tool Agent
+
+```python
+from datetime import datetime
+from pydantic_ai import Agent, RunContext
+
+@dataclass
+class ResearchDeps:
+    web_client: httpx.AsyncClient
+    graphiti: Graphiti
+    user_id: str
+
+research_agent = Agent(
+    "openai:gpt-4o",
+    deps_type=ResearchDeps,
+    system_prompt=(
+        "You are a research assistant. Use available tools to gather "
+        "information and provide comprehensive answers with sources."
+    )
+)
+
+@research_agent.tool
+async def search_web(ctx: RunContext[ResearchDeps], query: str) -> str:
+    """Search the web for current information."""
+    response = await ctx.deps.web_client.get(
+        "https://api.search.com/search",
+        params={"q": query}
+    )
+    results = response.json()
+    return "\n".join([r["snippet"] for r in results["items"][:5]])
+
+@research_agent.tool
+async def search_memory(ctx: RunContext[ResearchDeps], query: str) -> str:
+    """Search past conversations and knowledge."""
+    results = await ctx.deps.graphiti.search(
+        query=query,
+        group_ids=[ctx.deps.user_id],
+        num_results=10
+    )
+    return "\n".join([f"- {edge.fact}" for edge in results])
+
+@research_agent.tool
+async def get_current_time(ctx: RunContext[ResearchDeps]) -> str:
+    """Get the current date and time."""
+    return datetime.now().isoformat()
+```
+
+---
+
+## 2. Direct OpenAI SDK
+
+### Structured Output with Response Format
+
+```python
+from openai import AsyncOpenAI
+from pydantic import BaseModel
+
+class ExtractedData(BaseModel):
+    name: str
+    email: str
+    company: str | None = None
+    role: str | None = None
+
+async def extract_contact_info(text: str) -> ExtractedData:
+    """Extract structured contact info using OpenAI."""
+    client = AsyncOpenAI()
+    
+    completion = await client.beta.chat.completions.parse(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": "Extract contact information from the provided text."
+            },
+            {"role": "user", "content": text}
+        ],
+        response_format=ExtractedData
+    )
+    
+    return completion.choices[0].message.parsed
+```
+
+### Function Calling
+
+```python
+from openai import AsyncOpenAI
+import json
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City and state, e.g., San Francisco, CA"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "default": "fahrenheit"
+                    }
+                },
+                "required": ["location"]
+            }
+        }
+    }
+]
+
+async def chat_with_tools(message: str) -> str:
+    client = AsyncOpenAI()
+    
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": message}],
+        tools=tools,
+        tool_choice="auto"
+    )
+    
+    msg = response.choices[0].message
+    
+    if msg.tool_calls:
+        # Handle tool calls
+        tool_results = []
+        for tool_call in msg.tool_calls:
+            args = json.loads(tool_call.function.arguments)
+            result = await execute_tool(tool_call.function.name, args)
+            tool_results.append({
+                "tool_call_id": tool_call.id,
+                "role": "tool",
+                "content": json.dumps(result)
+            })
+        
+        # Continue conversation with tool results
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "user", "content": message},
+                msg,
+                *tool_results
+            ]
+        )
+    
+    return response.choices[0].message.content
+```
+
+---
+
+## 3. Streaming Responses
+
+### FastAPI Streaming Endpoint
+
+```python
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
+
+app = FastAPI()
+
+async def generate_stream(prompt: str):
+    """Generate streaming response from OpenAI."""
+    client = AsyncOpenAI()
+    
+    stream = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        stream=True
+    )
+    
+    async for chunk in stream:
+        if chunk.choices[0].delta.content:
+            yield f"data: {chunk.choices[0].delta.content}\n\n"
+    
+    yield "data: [DONE]\n\n"
+
+@app.post("/chat/stream")
+async def stream_chat(prompt: str):
+    return StreamingResponse(
+        generate_stream(prompt),
+        media_type="text/event-stream"
+    )
+```
+
+### PydanticAI Streaming
+
+```python
+from pydantic_ai import Agent
+
+agent = Agent("openai:gpt-4o")
+
+async def stream_agent_response(prompt: str):
+    """Stream agent response with real-time output."""
+    async with agent.run_stream(prompt) as result:
+        async for message in result.stream():
+            yield message
+        
+        # Get final structured result after streaming
+        final = await result.get_data()
+        return final
+```
+
+---
+
+## 4. Error Handling & Retries
+
+```python
+import backoff
+from openai import RateLimitError, APIError, AsyncOpenAI
+
+@backoff.on_exception(
+    backoff.expo,
+    (RateLimitError, APIError),
+    max_tries=5,
+    max_time=60
+)
+async def resilient_completion(prompt: str) -> str:
+    """LLM call with exponential backoff retry."""
+    client = AsyncOpenAI()
+    
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return response.choices[0].message.content
+```
+
+### Token & Cost Tracking
+
+```python
+import structlog
+from openai import AsyncOpenAI
+
+logger = structlog.get_logger()
+
+PRICING = {
+    "gpt-4o": {"input": 0.0025, "output": 0.01},
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+}
+
+async def tracked_completion(
+    prompt: str,
+    model: str = "gpt-4o",
+    user_id: str | None = None
+) -> tuple[str, dict]:
+    """LLM call with usage tracking."""
+    client = AsyncOpenAI()
+    
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    usage = response.usage
+    pricing = PRICING.get(model, {"input": 0, "output": 0})
+    
+    cost = (
+        (usage.prompt_tokens / 1000) * pricing["input"] +
+        (usage.completion_tokens / 1000) * pricing["output"]
+    )
+    
+    metrics = {
+        "model": model,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cost_usd": round(cost, 6)
+    }
+    
+    logger.info(
+        "llm_completion",
+        user_id=user_id,
+        **metrics
+    )
+    
+    return response.choices[0].message.content, metrics
+```
+
+---
+
+## 5. Embeddings
+
+```python
+from openai import AsyncOpenAI
+import numpy as np
+
+async def get_embeddings(
+    texts: list[str],
+    model: str = "text-embedding-3-small"
+) -> list[list[float]]:
+    """Generate embeddings for texts."""
+    client = AsyncOpenAI()
+    
+    response = await client.embeddings.create(
+        model=model,
+        input=texts
+    )
+    
+    return [item.embedding for item in response.data]
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Calculate cosine similarity between two vectors."""
+    a_arr = np.array(a)
+    b_arr = np.array(b)
+    return float(np.dot(a_arr, b_arr) / (np.linalg.norm(a_arr) * np.linalg.norm(b_arr)))
+```
+
+---
+
+## 6. Conversation Memory with Graphiti
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+from pydantic_ai import Agent, RunContext
+
+@dataclass
+class MemoryDeps:
+    graphiti: Graphiti
+    user_id: str
+    session_id: str
+
+memory_agent = Agent(
+    "openai:gpt-4o",
+    deps_type=MemoryDeps,
+    system_prompt=(
+        "You are an assistant with long-term memory. "
+        "Use the remember and recall tools to maintain context across conversations."
+    )
+)
+
+@memory_agent.tool
+async def remember(ctx: RunContext[MemoryDeps], content: str) -> str:
+    """Store important information in memory."""
+    result = await ctx.deps.graphiti.add_episode(
+        name=f"Memory from {ctx.deps.session_id}",
+        episode_body=content,
+        source=EpisodeType.text,
+        source_description="User conversation",
+        reference_time=datetime.now(timezone.utc),
+        group_id=ctx.deps.user_id
+    )
+    
+    entity_names = [node.name for node in result.nodes]
+    return f"Remembered: {', '.join(entity_names)}"
+
+@memory_agent.tool
+async def recall(ctx: RunContext[MemoryDeps], query: str) -> str:
+    """Recall relevant information from memory."""
+    results = await ctx.deps.graphiti.search(
+        query=query,
+        group_ids=[ctx.deps.user_id],
+        num_results=10
+    )
+    
+    if not results:
+        return "No relevant memories found."
+    
+    return "Relevant memories:\n" + "\n".join([
+        f"- {edge.fact}" for edge in results
+    ])
+```
+
+---
+
+## DO NOT
+
+- ❌ Use raw `dict` for agent dependencies (use typed `@dataclass`)
+- ❌ Hardcode API keys (use environment variables)
+- ❌ Skip retry logic for LLM calls
+- ❌ Ignore token usage and costs
+- ❌ Use synchronous OpenAI client in async code
+- ❌ Store full conversation history (use Graphiti for memory)
+- ❌ Skip input validation before LLM calls
+- ❌ Return raw LLM output without structured parsing

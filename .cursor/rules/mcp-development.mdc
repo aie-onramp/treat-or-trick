@@ -1,0 +1,520 @@
+---
+description: FastMCP server development patterns for Model Context Protocol
+globs: ["**/mcp/**/*.py", "**/mcp_servers/**/*.py", "**/*_mcp.py", "**/*_server.py"]
+alwaysApply: false
+---
+
+# FastMCP Development Standards
+
+## What is MCP?
+
+Model Context Protocol (MCP) is like **"USB-C for AI"** - a standardized way for AI assistants to connect to external tools and data sources.
+
+| MCP Concept | HTTP Analogy | Purpose |
+|-------------|--------------|---------|
+| **Resource** | GET endpoint | Read-only data retrieval |
+| **Tool** | POST endpoint | Execute actions with side effects |
+| **Prompt** | Template | Reusable prompt templates |
+
+## Why FastMCP?
+
+FastMCP is the **Pythonic** way to build MCP servers:
+
+```python
+# FastMCP: Clean decorator syntax
+@mcp.tool()
+def add(a: int, b: int) -> int:
+    """Add two numbers."""
+    return a + b
+
+# vs. raw MCP SDK: More boilerplate
+# ... requires manual schema definition
+```
+
+---
+
+## 1. Basic Server Setup
+
+### Minimal Server
+
+```python
+from fastmcp import FastMCP
+
+# Create server instance
+mcp = FastMCP(
+    name="my-server",
+    version="1.0.0",
+    description="My MCP server for AI assistants"
+)
+
+@mcp.tool()
+def greet(name: str) -> str:
+    """Greet a user by name.
+    
+    Args:
+        name: The name to greet
+    """
+    return f"Hello, {name}!"
+
+if __name__ == "__main__":
+    mcp.run()
+```
+
+### Server with Lifespan Management
+
+```python
+from contextlib import asynccontextmanager
+from fastmcp import FastMCP
+import httpx
+
+# Shared resources
+http_client: httpx.AsyncClient | None = None
+
+@asynccontextmanager
+async def lifespan(server: FastMCP):
+    """Manage server lifecycle."""
+    global http_client
+    
+    # Startup
+    http_client = httpx.AsyncClient(timeout=30)
+    print("Server started, HTTP client initialized")
+    
+    yield
+    
+    # Shutdown
+    await http_client.aclose()
+    print("Server stopped, resources cleaned up")
+
+mcp = FastMCP("my-server", lifespan=lifespan)
+```
+
+---
+
+## 2. Tools (Actions)
+
+Tools are for operations with **side effects** - creating, updating, deleting, or executing actions.
+
+### Basic Tool
+
+```python
+@mcp.tool()
+async def create_task(
+    title: str,
+    description: str = "",
+    priority: str = "medium"
+) -> dict:
+    """Create a new task.
+    
+    Args:
+        title: Task title (required)
+        description: Task description
+        priority: Priority level (low, medium, high)
+    """
+    task = await db.tasks.create({
+        "title": title,
+        "description": description,
+        "priority": priority,
+        "status": "pending"
+    })
+    
+    return {"id": task.id, "title": task.title, "status": "created"}
+```
+
+### Tool with Context
+
+```python
+from fastmcp import FastMCP, Context
+
+mcp = FastMCP("context-demo")
+
+@mcp.tool()
+async def long_running_task(
+    data: str,
+    ctx: Context
+) -> dict:
+    """Process data with progress reporting.
+    
+    Args:
+        data: Data to process
+        ctx: MCP context (injected automatically)
+    """
+    ctx.info("Starting data processing...")
+    
+    steps = ["validate", "transform", "save"]
+    results = []
+    
+    for i, step in enumerate(steps):
+        await ctx.report_progress(
+            progress=i,
+            total=len(steps),
+            message=f"Executing: {step}"
+        )
+        
+        result = await process_step(step, data)
+        results.append(result)
+        
+        ctx.info(f"Completed step: {step}")
+    
+    ctx.info("Processing complete!")
+    return {"steps": len(results), "status": "success"}
+```
+
+### Tool with Error Handling
+
+```python
+from fastmcp import FastMCP, Context
+from fastmcp.exceptions import ToolError
+
+@mcp.tool()
+async def fetch_user(
+    user_id: str,
+    ctx: Context
+) -> dict:
+    """Fetch user by ID.
+    
+    Args:
+        user_id: User identifier
+    """
+    try:
+        user = await db.users.find_one(user_id)
+        
+        if user is None:
+            ctx.warning(f"User {user_id} not found")
+            raise ToolError(f"User {user_id} not found")
+        
+        return user.model_dump()
+        
+    except DatabaseError as e:
+        ctx.error(f"Database error: {e}")
+        raise ToolError(f"Failed to fetch user: {e}")
+```
+
+---
+
+## 3. Resources (Data)
+
+Resources are for **read-only data** - configuration, documents, state.
+
+### Static Resource
+
+```python
+@mcp.resource("config://app/settings")
+def get_app_settings() -> dict:
+    """Get application settings."""
+    return {
+        "version": "1.0.0",
+        "environment": "production",
+        "features": ["search", "export", "notifications"]
+    }
+```
+
+### Dynamic Resource with URI Template
+
+```python
+@mcp.resource("users://{user_id}/profile")
+async def get_user_profile(user_id: str) -> dict:
+    """Get user profile by ID.
+    
+    Args:
+        user_id: User identifier from URI
+    """
+    user = await db.users.find_one(user_id)
+    if user is None:
+        return {"error": "User not found"}
+    
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "joined": user.created_at.isoformat()
+    }
+```
+
+### Resource Returning Text
+
+```python
+@mcp.resource("docs://readme")
+def get_readme() -> str:
+    """Get the README documentation."""
+    return """
+    # My Application
+    
+    This is the documentation for my application.
+    
+    ## Features
+    - Feature 1
+    - Feature 2
+    """
+```
+
+---
+
+## 4. Prompts (Templates)
+
+Prompts are **reusable prompt templates** that can be filled with arguments.
+
+### Basic Prompt
+
+```python
+from fastmcp.prompts import Prompt
+
+@mcp.prompt()
+def code_review_prompt(
+    code: str,
+    language: str = "python"
+) -> str:
+    """Generate a code review prompt.
+    
+    Args:
+        code: Code to review
+        language: Programming language
+    """
+    return f"""Please review the following {language} code:
+
+```{language}
+{code}
+```
+
+Focus on:
+1. Code quality and readability
+2. Potential bugs or issues
+3. Performance considerations
+4. Best practices for {language}
+"""
+```
+
+### Prompt with Messages
+
+```python
+from fastmcp.prompts import Message
+
+@mcp.prompt()
+def analysis_prompt(
+    topic: str,
+    context: str = ""
+) -> list[Message]:
+    """Generate an analysis prompt with system context.
+    
+    Args:
+        topic: Topic to analyze
+        context: Additional context
+    """
+    messages = [
+        Message(
+            role="system",
+            content="You are an expert analyst. Provide thorough, balanced analysis."
+        ),
+        Message(
+            role="user",
+            content=f"Please analyze: {topic}"
+        )
+    ]
+    
+    if context:
+        messages.append(Message(
+            role="user",
+            content=f"Additional context: {context}"
+        ))
+    
+    return messages
+```
+
+---
+
+## 5. FastMCP Client Usage
+
+### Using Client to Test Server
+
+```python
+from fastmcp import Client
+
+async def test_server():
+    """Test MCP server using client."""
+    async with Client(mcp) as client:
+        # List available tools
+        tools = await client.list_tools()
+        print(f"Available tools: {[t.name for t in tools]}")
+        
+        # Call a tool
+        result = await client.call_tool(
+            "create_task",
+            {"title": "Test task", "priority": "high"}
+        )
+        print(f"Tool result: {result}")
+        
+        # Read a resource
+        settings = await client.read_resource("config://app/settings")
+        print(f"Settings: {settings}")
+```
+
+### Client for Remote Server
+
+```python
+from fastmcp import Client
+
+async def connect_to_remote():
+    """Connect to remote MCP server."""
+    # Stdio connection (for local servers)
+    async with Client("my-server") as client:
+        result = await client.call_tool("greet", {"name": "World"})
+    
+    # HTTP connection (for remote servers)
+    async with Client("http://localhost:8000") as client:
+        result = await client.call_tool("greet", {"name": "World"})
+```
+
+---
+
+## 6. Cursor Integration
+
+### MCP Configuration
+
+```json
+// .cursor/mcp.json
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.tools_server"],
+      "transport": "stdio"
+    },
+    "memory": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.memory_server"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+### WSL Configuration (Windows + WSL)
+
+```json
+// .cursor/mcp.json (when Cursor runs on Windows, code in WSL)
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "wsl",
+      "args": ["--", "uv", "run", "python", "-m", "mcp_servers.tools_server"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+### Native WSL Configuration
+
+```json
+// .cursor/mcp.json (when Cursor runs in WSL)
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.tools_server"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+---
+
+## 7. Project Structure
+
+```
+project/
+├── mcp_servers/
+│   ├── __init__.py
+│   ├── __main__.py          # Entry point
+│   ├── tools_server.py      # General tools
+│   ├── memory_server.py     # Memory/knowledge tools
+│   └── shared/
+│       ├── __init__.py
+│       ├── config.py        # Shared configuration
+│       └── clients.py       # Shared clients (DB, HTTP)
+├── .cursor/
+│   └── mcp.json             # Cursor MCP configuration
+└── pyproject.toml
+```
+
+### Entry Point Pattern
+
+```python
+# mcp_servers/__main__.py
+import sys
+from .tools_server import mcp as tools_mcp
+from .memory_server import mcp as memory_mcp
+
+servers = {
+    "tools": tools_mcp,
+    "memory": memory_mcp,
+}
+
+if __name__ == "__main__":
+    server_name = sys.argv[1] if len(sys.argv) > 1 else "tools"
+    server = servers.get(server_name)
+    
+    if server is None:
+        print(f"Unknown server: {server_name}")
+        print(f"Available: {list(servers.keys())}")
+        sys.exit(1)
+    
+    server.run()
+```
+
+---
+
+## 8. Testing MCP Servers
+
+```python
+import pytest
+from fastmcp import Client
+from mcp_servers.tools_server import mcp
+
+class TestToolsServer:
+    """Test MCP tools server."""
+    
+    @pytest.fixture
+    async def client(self):
+        """Create test client."""
+        async with Client(mcp) as client:
+            yield client
+    
+    async def test_list_tools(self, client: Client):
+        """Verify tools are registered."""
+        tools = await client.list_tools()
+        tool_names = [t.name for t in tools]
+        
+        assert "create_task" in tool_names
+        assert "fetch_user" in tool_names
+    
+    async def test_create_task_success(self, client: Client):
+        """Test task creation."""
+        result = await client.call_tool(
+            "create_task",
+            {"title": "Test Task", "priority": "high"}
+        )
+        
+        assert result["status"] == "created"
+        assert "id" in result
+    
+    async def test_resource_retrieval(self, client: Client):
+        """Test resource access."""
+        settings = await client.read_resource("config://app/settings")
+        
+        assert "version" in settings
+        assert "features" in settings
+```
+
+---
+
+## DO NOT
+
+- ❌ Put side effects in resources (use tools instead)
+- ❌ Skip docstrings (they become tool descriptions)
+- ❌ Forget Context parameter for long operations
+- ❌ Use blocking I/O in async tools
+- ❌ Hardcode paths in mcp.json (use relative paths)
+- ❌ Skip error handling (wrap in ToolError)
+- ❌ Mix WSL and Windows paths in configuration
+- ❌ Forget to close resources in lifespan

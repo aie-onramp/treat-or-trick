@@ -1,0 +1,273 @@
+---
+alwaysApply: false
+---
+# Git Workflow Standards
+
+## Conventional Commits
+
+**Format**: `type(scope): description`
+
+### Commit Types
+
+| Type | When to Use | Example |
+|------|-------------|---------|
+| `feat` | New feature | `feat(api): add user registration endpoint` |
+| `fix` | Bug fix | `fix(auth): resolve token expiration issue` |
+| `docs` | Documentation | `docs(readme): update installation steps` |
+| `refactor` | Code restructure (no behavior change) | `refactor(models): extract base schema class` |
+| `test` | Add/modify tests | `test(api): add user endpoint tests` |
+| `chore` | Maintenance | `chore(deps): update pydantic to 2.5` |
+| `style` | Formatting | `style: apply black formatting` |
+| `perf` | Performance | `perf(db): add index for user queries` |
+| `ci` | CI/CD changes | `ci: add GitHub Actions workflow` |
+
+### Scope Examples
+
+```
+feat(api): add user registration endpoint
+feat(auth): implement JWT refresh tokens
+feat(mcp): add memory server tools
+fix(graphiti): handle empty search results
+docs(temporal): add workflow examples
+refactor(agents): extract common deps class
+test(mcp): add tools server tests
+chore(deps): update fastapi to 0.110
+```
+
+### Commit Message Rules
+
+```markdown
+# Good commit messages
+feat(api): add pagination to user list endpoint
+fix(auth): prevent token reuse after logout
+refactor(models): consolidate user schema variants
+
+# Bad commit messages
+❌ "fixed stuff"
+❌ "WIP"
+❌ "updates"
+❌ "feat: add feature"  (missing scope)
+❌ "feat(api) add endpoint"  (missing colon)
+```
+
+---
+
+## Branch Naming
+
+### Pattern: `type/short-description`
+
+| Type | Purpose | Example |
+|------|---------|---------|
+| `feature/` | New features | `feature/user-registration` |
+| `fix/` | Bug fixes | `fix/auth-token-expiry` |
+| `refactor/` | Code improvements | `refactor/extract-base-models` |
+| `docs/` | Documentation | `docs/api-reference` |
+| `test/` | Test additions | `test/mcp-server-integration` |
+| `release/` | Release prep | `release/v1.2.0` |
+| `hotfix/` | Production fixes | `hotfix/critical-auth-bug` |
+
+### Branch Examples
+
+```bash
+# Feature branches
+git checkout -b feature/add-graphiti-memory
+git checkout -b feature/temporal-workflow-integration
+
+# Fix branches
+git checkout -b fix/mcp-stdio-connection
+git checkout -b fix/pydantic-validation-error
+
+# Release branches
+git checkout -b release/v2.0.0
+```
+
+---
+
+## AI Behavior Rules
+
+When assisting with Git operations, follow these rules:
+
+### Before Committing
+
+1. **Verify current branch**: Check you're not on `main` or `master`
+2. **Review changes**: Use `git diff --staged` to see what will be committed
+3. **Group logically**: Related changes go in one commit
+
+### Suggesting Commit Messages
+
+```python
+# When user asks: "commit this"
+# AI should:
+
+# 1. Analyze staged changes
+git diff --staged --name-only
+
+# 2. Determine appropriate type
+# - New files in api/ → feat(api)
+# - Modified test files → test(component)
+# - Updated docs/ → docs(topic)
+
+# 3. Suggest specific message
+# "I suggest: feat(api): add user profile endpoint"
+```
+
+### Never Commit
+
+- ❌ `.env` files or secrets
+- ❌ `__pycache__/` directories
+- ❌ `.venv/` or `node_modules/`
+- ❌ IDE settings (`.idea/`, `.vscode/`)
+- ❌ Build artifacts
+- ❌ Large binary files
+
+### Standard .gitignore
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+```
+
+---
+
+## Workflow Patterns
+
+### Feature Development
+
+```bash
+# 1. Start from main
+git checkout main
+git pull origin main
+
+# 2. Create feature branch
+git checkout -b feature/add-memory-tools
+
+# 3. Make changes and commit incrementally
+git add mcp_servers/memory_server.py
+git commit -m "feat(mcp): add remember tool"
+
+git add mcp_servers/memory_server.py
+git commit -m "feat(mcp): add recall tool"
+
+git add tests/test_memory_server.py
+git commit -m "test(mcp): add memory server tests"
+
+# 4. Push and create PR
+git push -u origin feature/add-memory-tools
+```
+
+### Hotfix Workflow
+
+```bash
+# 1. Branch from main
+git checkout main
+git pull origin main
+git checkout -b hotfix/fix-auth-crash
+
+# 2. Fix and commit
+git add app/auth.py
+git commit -m "fix(auth): handle null token gracefully"
+
+# 3. Push immediately
+git push -u origin hotfix/fix-auth-crash
+
+# 4. Merge to main (after review)
+# 5. Tag release
+git tag -a v1.0.1 -m "Hotfix: auth crash"
+```
+
+### Release Workflow
+
+```bash
+# 1. Create release branch
+git checkout -b release/v2.0.0
+
+# 2. Update version
+# Edit pyproject.toml, __init__.py
+git add pyproject.toml app/__init__.py
+git commit -m "chore(release): bump version to 2.0.0"
+
+# 3. Update changelog
+git add CHANGELOG.md
+git commit -m "docs(changelog): add v2.0.0 changes"
+
+# 4. Merge and tag
+git checkout main
+git merge release/v2.0.0
+git tag -a v2.0.0 -m "Release v2.0.0"
+git push origin main --tags
+```
+
+---
+
+## PR Description Template
+
+```markdown
+## Summary
+Brief description of what this PR does.
+
+## Type of Change
+- [ ] feat: New feature
+- [ ] fix: Bug fix
+- [ ] refactor: Code refactoring
+- [ ] docs: Documentation
+- [ ] test: Tests
+- [ ] chore: Maintenance
+
+## Changes
+- Added X
+- Modified Y
+- Removed Z
+
+## Testing
+- [ ] Unit tests pass
+- [ ] Integration tests pass
+- [ ] Manual testing completed
+
+## Screenshots (if applicable)
+
+## Checklist
+- [ ] Code follows project style guidelines
+- [ ] Self-reviewed the code
+- [ ] Added/updated documentation
+- [ ] No new warnings
+```
+
+---
+
+## DO NOT
+
+- ❌ Commit directly to `main` or `master`
+- ❌ Use generic commit messages ("fix", "update", "WIP")
+- ❌ Commit secrets, API keys, or credentials
+- ❌ Force push to shared branches
+- ❌ Create commits with unrelated changes mixed together
+- ❌ Leave merge conflicts unresolved
+- ❌ Skip the scope in conventional commits
