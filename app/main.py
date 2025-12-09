@@ -2,6 +2,7 @@
 
 import structlog
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
@@ -46,6 +47,19 @@ app = FastAPI(
             "description": "Endpoints for getting feedback from the Angel reviewer.",
         },
     ],
+)
+
+# Configure CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",  # Local Next.js dev
+        "https://treat-or-hell.vercel.app",  # Production frontend
+        "https://*.vercel.app",  # Vercel preview deployments
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include API routes
