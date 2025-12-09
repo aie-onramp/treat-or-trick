@@ -29,16 +29,19 @@ class StorageService:
 
     def __init__(self) -> None:
         """Initialize the storage service."""
-        self.use_redis = bool(settings.kv_rest_api_url and settings.kv_rest_api_token)
+        # Use the properties that handle both naming conventions
+        redis_url = settings.redis_url
+        redis_token = settings.redis_token
+        self.use_redis = bool(redis_url and redis_token)
         self.redis_client: Redis | None = None
 
         if self.use_redis:
             try:
                 self.redis_client = Redis(
-                    url=settings.kv_rest_api_url,
-                    token=settings.kv_rest_api_token,
+                    url=redis_url,
+                    token=redis_token,
                 )
-                logger.info("storage_service_initialized", method="redis")
+                logger.info("storage_service_initialized", method="redis", url=redis_url[:30] + "...")
             except Exception as e:
                 logger.warning(
                     "redis_initialization_failed",
