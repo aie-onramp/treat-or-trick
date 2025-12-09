@@ -1,0 +1,392 @@
+---
+description: Core conventions for AI Engineering course - FastAPI, Pydantic, PydanticAI, FastMCP, Graphiti, Temporal
+globs: ["**/*.py"]
+alwaysApply: true
+---
+
+# AI Engineering Development Standards
+
+## Role Definition
+
+You are a **Senior AI Engineer** specializing in:
+- **FastAPI** for high-performance async APIs
+- **Pydantic v2** for data validation and serialization
+- **PydanticAI** for type-safe LLM agent development
+- **FastMCP** for Model Context Protocol servers
+- **Graphiti** for temporal knowledge graphs
+- **Temporal** for durable workflow execution
+
+## Core Philosophy: Design Before Code
+
+**ALWAYS follow this 5-step workflow:**
+
+1. **Clarify Requirements** → Ask questions if the task is ambiguous
+2. **Define Pydantic Schemas** → Data contracts FIRST, implementation SECOND
+3. **Plan API/Workflow Structure** → OpenAPI semantics, Temporal activities
+4. **Visualize Complex Flows** → Mermaid diagrams for multi-step operations
+5. **Implement & Test** → Code that matches the design, tests for critical paths
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│ 1. Requirements │───▶│ 2. Schemas      │───▶│ 3. API Design   │
+│    (Ask/Clarify)│    │    (Pydantic)   │    │    (OpenAPI)    │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                       │
+┌─────────────────┐    ┌─────────────────┐            │
+│ 5. Implement    │◀───│ 4. Visualize    │◀───────────┘
+│    (Code+Test)  │    │    (Mermaid)    │
+└─────────────────┘    └─────────────────┘
+```
+
+---
+
+## Documentation References
+
+When implementing features, consult these indexed documentation sources:
+
+| Domain | Source | Use For |
+|--------|--------|---------|
+| API Framework | `@FastAPIDocs` | Endpoints, dependencies, middleware |
+| Validation | `@Pydantic` | Models, validators, serialization |
+| AI Agents | `@PydanticAI` | Agent patterns, tools, structured output |
+| LLM APIs | `@OpenAIDocs` | Chat completions, embeddings, function calling |
+| MCP Servers | `@GoFastMCP` | Tools, resources, prompts, client usage |
+| Knowledge Graphs | `@Graphiti` | Episodes, entities, temporal queries |
+| Durable Execution | `@Temporal` | Workflows, activities, determinism |
+| Package Management | `@UV` | Dependencies, virtual environments |
+
+---
+
+## Technology Stack
+
+| Category | Primary | Alternative | Avoid |
+|----------|---------|-------------|-------|
+| HTTP Framework | FastAPI | Starlette | Flask, Django REST |
+| Validation | Pydantic v2 | - | dataclasses for APIs |
+| Async HTTP Client | httpx | aiohttp | requests |
+| LLM Integration | PydanticAI | openai SDK | langchain |
+| MCP Framework | FastMCP | mcp SDK | - |
+| Knowledge Graph | Graphiti | - | raw Neo4j |
+| Orchestration | Temporal | - | Celery for AI |
+| Testing | pytest + pytest-asyncio | - | unittest |
+| Package Manager | uv | pip | conda |
+
+---
+
+## Python Style Conventions
+
+### Naming
+
+```python
+# Variables and functions: snake_case
+user_name = "john"
+def calculate_total_price(items: list[Item]) -> float: ...
+
+# Classes: PascalCase
+class UserProfile(BaseModel): ...
+
+# Constants: UPPER_SNAKE_CASE
+MAX_RETRIES = 3
+DEFAULT_TIMEOUT_SECONDS = 30
+
+# Private: leading underscore
+_internal_cache = {}
+def _validate_internal(data: dict) -> bool: ...
+```
+
+### Type Hints (REQUIRED)
+
+```python
+# ✅ Always type function signatures
+async def create_user(
+    request: UserCreate,
+    db: Database = Depends(get_database)
+) -> UserResponse:
+    ...
+
+# ✅ Use modern generic syntax (Python 3.10+)
+items: list[Item]           # Not List[Item]
+mapping: dict[str, int]     # Not Dict[str, int]
+optional: str | None        # Not Optional[str]
+
+# ✅ Use TypeVar for generic functions
+from typing import TypeVar
+T = TypeVar("T", bound=BaseModel)
+
+async def fetch_one(model: type[T], id: str) -> T | None:
+    ...
+```
+
+### Import Organization
+
+```python
+# 1. Standard library
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+
+# 2. Third-party packages
+from fastapi import FastAPI, Depends, HTTPException
+from pydantic import BaseModel, Field
+import structlog
+
+# 3. Local application
+from app.models import User, UserCreate
+from app.dependencies import get_database
+```
+
+---
+
+## Project Structure
+
+```
+project/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                 # FastAPI app entry point
+│   ├── config.py               # Settings with Pydantic
+│   ├── dependencies.py         # FastAPI dependencies
+│   ├── models/                 # Pydantic schemas
+│   │   ├── __init__.py
+│   │   ├── base.py             # Shared base models
+│   │   ├── user.py
+│   │   └── item.py
+│   ├── api/                    # API routes
+│   │   ├── __init__.py
+│   │   ├── v1/
+│   │   │   ├── __init__.py
+│   │   │   ├── users.py
+│   │   │   └── items.py
+│   │   └── router.py
+│   ├── services/               # Business logic
+│   │   ├── __init__.py
+│   │   └── user_service.py
+│   ├── agents/                 # PydanticAI agents
+│   │   ├── __init__.py
+│   │   ├── support_agent.py
+│   │   └── research_agent.py
+│   └── db/                     # Database layer
+│       ├── __init__.py
+│       └── repository.py
+├── mcp_servers/                # FastMCP servers
+│   ├── __init__.py
+│   ├── memory_server.py
+│   └── tools_server.py
+├── temporal/                   # Temporal workflows
+│   ├── __init__.py
+│   ├── workflows/
+│   ├── activities/
+│   └── worker.py
+├── tests/
+│   ├── conftest.py
+│   ├── unit/
+│   ├── integration/
+│   └── e2e/
+├── pyproject.toml
+└── README.md
+```
+
+---
+
+## Error Handling Pattern
+
+```python
+import structlog
+from fastapi import HTTPException, status
+
+logger = structlog.get_logger()
+
+async def get_user_by_id(user_id: str) -> User:
+    """Fetch user with proper error handling."""
+    try:
+        user = await db.users.find_one({"id": user_id})
+        
+        if user is None:
+            logger.warning("user_not_found", user_id=user_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User {user_id} not found"
+            )
+        
+        return User.model_validate(user)
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.exception("user_fetch_failed", user_id=user_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
+```
+
+---
+
+## Environment Configuration
+
+### WSL + Windows Development
+
+**CRITICAL**: When developing with MCP servers in WSL + Windows environments:
+
+```markdown
+## Execution Context Rules
+
+1. **MCP Server Location**: Run MCP servers FROM WSL, not Windows
+2. **Path Format**: Use Linux paths in mcp.json: `/home/user/project/...`
+3. **Transport**: Use `http` transport for cross-boundary stability when possible
+4. **Process Management**: Add cleanup scripts for zombie processes
+
+## mcp.json for WSL
+
+```json
+{
+  "mcpServers": {
+    "memory-server": {
+      "command": "wsl",
+      "args": ["--", "uv", "run", "/home/user/project/mcp_servers/memory_server.py"],
+      "transport": "stdio"
+    },
+    "tools-server": {
+      "command": "wsl", 
+      "args": ["--", "uv", "run", "/home/user/project/mcp_servers/tools_server.py"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+## Native WSL mcp.json (when Cursor runs in WSL)
+
+```json
+{
+  "mcpServers": {
+    "memory-server": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.memory_server"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+## Cleanup Script
+
+```bash
+#!/bin/bash
+# cleanup-mcp.sh - Kill orphaned MCP processes
+pkill -f "mcp_server"
+pkill -f "memory_server"
+```
+```
+
+### Environment Variables
+
+```python
+# app/config.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    """Application settings with validation."""
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+    
+    # API Keys
+    openai_api_key: str
+    anthropic_api_key: str | None = None
+    
+    # Database
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str
+    
+    # Temporal
+    temporal_host: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    
+    # Application
+    debug: bool = False
+    log_level: str = "INFO"
+
+settings = Settings()
+```
+
+---
+
+## Async Patterns
+
+### Always Use Async for I/O
+
+```python
+# ✅ Async database operations
+async def get_users() -> list[User]:
+    async with get_db_session() as session:
+        result = await session.execute(select(UserModel))
+        return [User.model_validate(row) for row in result.scalars()]
+
+# ✅ Async HTTP client
+async def fetch_external_data(url: str) -> dict:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+# ✅ Parallel async operations
+async def fetch_all_data(ids: list[str]) -> list[dict]:
+    async with httpx.AsyncClient() as client:
+        tasks = [client.get(f"/api/data/{id}") for id in ids]
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r.json() for r in responses if not isinstance(r, Exception)]
+```
+
+---
+
+## Logging Standards
+
+```python
+import structlog
+
+# Configure once at startup
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer()
+    ]
+)
+
+logger = structlog.get_logger()
+
+# ✅ Structured logging with context
+async def process_order(order_id: str, user_id: str):
+    log = logger.bind(order_id=order_id, user_id=user_id)
+    
+    log.info("order_processing_started")
+    
+    try:
+        result = await _process(order_id)
+        log.info("order_processing_completed", result=result)
+        return result
+    except Exception as e:
+        log.exception("order_processing_failed", error=str(e))
+        raise
+```
+
+---
+
+## DO NOT
+
+- ❌ Use `print()` for logging - use `structlog`
+- ❌ Hardcode secrets - use environment variables
+- ❌ Use `Any` type without justification
+- ❌ Use `requests` library - use `httpx` for async
+- ❌ Skip type hints on function signatures
+- ❌ Mix sync and async code without proper handling
+- ❌ Catch bare `Exception` without re-raising or logging
+- ❌ Use camelCase for Python variables (use snake_case)
+- ❌ Import from `typing` for built-in generics (use `list`, `dict`, `|`)
+- ❌ Run MCP servers without checking WSL/Windows context
+- ❌ Forget to clean up zombie MCP processes in development

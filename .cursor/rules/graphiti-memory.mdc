@@ -1,0 +1,506 @@
+---
+description: Graphiti temporal knowledge graph patterns for AI agent memory
+globs: ["**/memory/**/*.py", "**/graph/**/*.py", "**/graphiti/**/*.py", "**/*_memory.py"]
+alwaysApply: false
+---
+
+# Graphiti Knowledge Graph Standards
+
+## What is Graphiti?
+
+Graphiti is a **temporally-aware knowledge graph** framework designed for AI agent memory. Unlike traditional RAG that retrieves static documents, Graphiti:
+
+- **Incrementally updates** without full recomputation
+- **Tracks temporal validity** of facts (when something became true/false)
+- **Achieves sub-300ms retrieval** latency
+- **Supports bi-temporal queries** (when fact was recorded vs. when it was valid)
+
+## Core Concepts
+
+| Concept | Description | Example |
+|---------|-------------|---------|
+| **Episode** | A unit of information ingested | "Alice started at Acme Corp in January" |
+| **Entity Node** | An extracted entity | Person: Alice, Company: Acme Corp |
+| **Entity Edge** | A relationship between entities | Alice → WORKS_AT → Acme Corp |
+| **valid_at** | When the fact became true | 2024-01-15 |
+| **invalid_at** | When the fact stopped being true | 2024-06-30 (if Alice left) |
+
+---
+
+## 1. Setup & Configuration
+
+### Initialize Graphiti Client
+
+```python
+from graphiti_core import Graphiti
+
+async def get_graphiti_client() -> Graphiti:
+    """Create configured Graphiti client."""
+    graphiti = Graphiti(
+        uri="bolt://localhost:7687",
+        user="neo4j",
+        password="your-password"
+    )
+    
+    # Build indices on first run
+    await graphiti.build_indices_and_constraints()
+    
+    return graphiti
+
+# Usage with context manager pattern
+async def with_graphiti():
+    graphiti = await get_graphiti_client()
+    try:
+        yield graphiti
+    finally:
+        await graphiti.close()
+```
+
+---
+
+## 2. Ingesting Episodes
+
+### Basic Episode Ingestion
+
+```python
+from datetime import datetime, timezone
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+
+async def ingest_conversation(
+    graphiti: Graphiti,
+    conversation: str,
+    user_id: str,
+    session_id: str
+) -> dict:
+    """Ingest a conversation into the knowledge graph."""
+    result = await graphiti.add_episode(
+        name=f"Conversation {session_id}",
+        episode_body=conversation,
+        source=EpisodeType.text,
+        source_description="User conversation",
+        reference_time=datetime.now(timezone.utc),
+        group_id=user_id  # Isolate by user
+    )
+    
+    return {
+        "entities": [node.name for node in result.nodes],
+        "facts": [edge.fact for edge in result.edges],
+        "episode_uuid": result.episode_uuid
+    }
+```
+
+---
+
+## 3. Custom Entity Types
+
+### Define Custom Entities with Pydantic
+
+```python
+from pydantic import BaseModel, Field
+
+class Product(BaseModel):
+    """Custom entity type for products."""
+    name: str
+    category: str
+    price: float = Field(description="Price in USD")
+    sku: str | None = None
+
+class Customer(BaseModel):
+    """Custom entity type for customers."""
+    name: str
+    email: str
+    subscription_tier: str = Field(description="free, pro, enterprise")
+
+# Use custom entities during ingestion
+async def ingest_with_custom_entities(
+    graphiti: Graphiti,
+    content: str,
+    group_id: str
+):
+    """Ingest with custom entity type extraction."""
+    entity_types = {
+        "Product": Product,
+        "Customer": Customer,
+    }
+    
+    result = await graphiti.add_episode(
+        name="Business Data",
+        episode_body=content,
+        source=EpisodeType.text,
+        source_description="Business records",
+        reference_time=datetime.now(timezone.utc),
+        group_id=group_id,
+        entity_types=entity_types
+    )
+    
+    # Access extracted custom attributes
+    for node in result.nodes:
+        if node.attributes:
+            print(f"{node.name}: {node.attributes}")
+    
+    return result
+```
+
+---
+
+## 4. Schema Evolution (CRITICAL)
+
+**IMPORTANT**: Schema changes do NOT apply retroactively to existing graph data.
+
+### When Modifying Entity Definitions
+
+```python
+# ✅ CORRECT: Version your entity types during migration
+
+# Original entity type
+class ProductV1(BaseModel):
+    name: str
+    category: str
+    price: float
+
+# New entity type with additional field
+class ProductV2(BaseModel):
+    name: str
+    category: str
+    price: float
+    sku: str  # New required field
+    discount_eligible: bool = False  # New optional field
+
+async def migrate_product_schema(
+    graphiti: Graphiti,
+    group_id: str
+):
+    """Migrate Product entities to V2 schema."""
+    from graphiti_core.search.search_config_recipes import NODE_HYBRID_SEARCH_RRF
+    
+    # 1. Find all existing Product entities
+    config = NODE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+    config.limit = 100
+    
+    results = await graphiti._search(
+        query="Product",
+        search_config=config
+    )
+    
+    product_nodes = [n for n in results if "Product" in getattr(n, 'labels', [])]
+    
+    print(f"Found {len(product_nodes)} products to migrate")
+    
+    # 2. Re-ingest with new schema
+    for node in product_nodes:
+        # Generate SKU if missing
+        sku = f"LEGACY-{node.uuid[:8].upper()}"
+        
+        migration_text = f"""
+        Product Update: {node.name}
+        - SKU: {sku}
+        - Discount Eligible: False
+        """
+        
+        await graphiti.add_episode(
+            name=f"Migration: {node.name}",
+            episode_body=migration_text,
+            source=EpisodeType.text,
+            source_description="Schema migration",
+            reference_time=datetime.now(timezone.utc),
+            group_id=group_id,
+            entity_types={"Product": ProductV2}
+        )
+    
+    print("Migration complete")
+
+# 3. Rebuild indices after migration
+async def post_migration_cleanup(graphiti: Graphiti):
+    """Rebuild indices after schema migration."""
+    await graphiti.build_indices_and_constraints()
+```
+
+### Schema Evolution Rules
+
+```markdown
+## Schema Evolution Checklist
+
+1. **Never assume retroactive changes**: Existing nodes won't have new fields
+2. **Version your entity types**: ProductV1 → ProductV2 during migration
+3. **Write migration scripts**: Document and automate schema transitions
+4. **Rebuild indices**: Call `build_indices_and_constraints()` after changes
+5. **Test with isolated group_id**: Migrate test data first before production
+
+## Migration Steps
+
+- [ ] Define new entity type with version suffix (e.g., ProductV2)
+- [ ] Write migration script to find existing entities
+- [ ] Transform existing data to new schema format
+- [ ] Re-ingest with new entity_types dict
+- [ ] Rebuild indices
+- [ ] Update application code to use new entity type
+- [ ] Remove old entity type after successful migration
+```
+
+---
+
+## 5. Querying the Graph
+
+### Semantic Search
+
+```python
+async def semantic_search(
+    graphiti: Graphiti,
+    query: str,
+    user_id: str,
+    limit: int = 10
+) -> list[str]:
+    """Search for relevant facts using semantic similarity."""
+    results = await graphiti.search(
+        query=query,
+        group_ids=[user_id],
+        num_results=limit
+    )
+    
+    return [edge.fact for edge in results]
+```
+
+### Hybrid Search (Semantic + BM25 + Graph)
+
+```python
+from graphiti_core.search.search_config_recipes import (
+    COMBINED_HYBRID_SEARCH_RRF,
+    NODE_HYBRID_SEARCH_RRF,
+)
+
+async def hybrid_search(
+    graphiti: Graphiti,
+    query: str,
+    user_id: str
+) -> dict:
+    """Advanced hybrid search with multiple strategies."""
+    config = COMBINED_HYBRID_SEARCH_RRF.model_copy(deep=True)
+    config.limit = 15
+    
+    results = await graphiti.search_(
+        query=query,
+        config=config,
+        group_ids=[user_id]
+    )
+    
+    return {
+        "entities": [
+            {"name": n.name, "summary": n.summary}
+            for n in results.nodes
+        ],
+        "facts": [
+            {"fact": e.fact, "created": e.created_at.isoformat()}
+            for e in results.edges
+        ]
+    }
+```
+
+### Temporal Queries
+
+```python
+from datetime import timedelta
+from graphiti_core.search.search_filters import SearchFilters
+
+async def query_recent_context(
+    graphiti: Graphiti,
+    query: str,
+    user_id: str,
+    days_back: int = 7
+) -> list[str]:
+    """Query facts from recent timeframe."""
+    now = datetime.now(timezone.utc)
+    
+    search_filter = SearchFilters(
+        valid_after=now - timedelta(days=days_back),
+        valid_before=now
+    )
+    
+    results = await graphiti.search(
+        query=query,
+        group_ids=[user_id],
+        num_results=20,
+        search_filter=search_filter
+    )
+    
+    return [
+        f"{edge.fact} (as of {edge.valid_at.date() if edge.valid_at else 'unknown'})"
+        for edge in results
+    ]
+```
+
+---
+
+## 6. FastMCP Integration
+
+### Memory MCP Server
+
+```python
+from datetime import datetime, timezone
+from fastmcp import FastMCP
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+
+mcp = FastMCP("memory-server")
+
+# Global client (initialized on startup)
+graphiti: Graphiti | None = None
+
+@mcp.tool()
+async def remember(
+    content: str,
+    user_id: str,
+    importance: str = "normal"
+) -> str:
+    """Store information in long-term memory.
+    
+    Args:
+        content: Information to remember
+        user_id: User identifier for memory isolation
+        importance: Priority level (low, normal, high)
+    """
+    if graphiti is None:
+        return "Memory system not initialized"
+    
+    result = await graphiti.add_episode(
+        name=f"Memory [{importance}]",
+        episode_body=content,
+        source=EpisodeType.text,
+        source_description=f"User memory (importance: {importance})",
+        reference_time=datetime.now(timezone.utc),
+        group_id=user_id
+    )
+    
+    entities = [node.name for node in result.nodes]
+    return f"Remembered {len(entities)} entities: {', '.join(entities)}"
+
+@mcp.tool()
+async def recall(
+    query: str,
+    user_id: str,
+    limit: int = 10
+) -> str:
+    """Retrieve relevant information from memory.
+    
+    Args:
+        query: What to search for
+        user_id: User identifier for memory isolation
+        limit: Maximum number of results
+    """
+    if graphiti is None:
+        return "Memory system not initialized"
+    
+    results = await graphiti.search(
+        query=query,
+        group_ids=[user_id],
+        num_results=limit
+    )
+    
+    if not results:
+        return "No relevant memories found."
+    
+    facts = [f"- {edge.fact}" for edge in results]
+    return f"Found {len(facts)} relevant memories:\n" + "\n".join(facts)
+
+@mcp.tool()
+async def forget(episode_uuid: str) -> str:
+    """Remove a specific memory episode.
+    
+    Args:
+        episode_uuid: UUID of the episode to remove
+    """
+    if graphiti is None:
+        return "Memory system not initialized"
+    
+    await graphiti.remove_episode(episode_uuid)
+    return f"Episode {episode_uuid} removed"
+
+# Lifecycle management
+async def initialize():
+    global graphiti
+    graphiti = Graphiti(
+        uri="bolt://localhost:7687",
+        user="neo4j",
+        password="password"
+    )
+    await graphiti.build_indices_and_constraints()
+
+async def shutdown():
+    global graphiti
+    if graphiti:
+        await graphiti.close()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(initialize())
+    mcp.run()
+```
+
+---
+
+## 7. Manual Triplet Creation
+
+```python
+from graphiti_core.nodes import EntityNode
+from graphiti_core.edges import EntityEdge
+
+async def create_explicit_relationship(
+    graphiti: Graphiti,
+    source_name: str,
+    source_type: str,
+    target_name: str,
+    target_type: str,
+    relationship: str,
+    fact: str,
+    group_id: str
+):
+    """Manually create a specific triplet relationship."""
+    source_node = EntityNode(
+        name=source_name,
+        labels=[source_type],
+        summary=f"{source_type}: {source_name}",
+        group_id=group_id
+    )
+    
+    target_node = EntityNode(
+        name=target_name,
+        labels=[target_type],
+        summary=f"{target_type}: {target_name}",
+        group_id=group_id
+    )
+    
+    edge = EntityEdge(
+        source_node_uuid=source_node.uuid,
+        target_node_uuid=target_node.uuid,
+        name=relationship,
+        fact=fact,
+        group_id=group_id,
+        created_at=datetime.now(timezone.utc),
+        valid_at=datetime.now(timezone.utc),
+        episodes=[]
+    )
+    
+    result = await graphiti.add_triplet(
+        source_node=source_node,
+        edge=edge,
+        target_node=target_node
+    )
+    
+    return {
+        "nodes": [n.name for n in result.nodes],
+        "relationship": result.edges[0].fact
+    }
+```
+
+---
+
+## DO NOT
+
+- ❌ Assume schema changes apply to existing data
+- ❌ Skip `build_indices_and_constraints()` after schema changes
+- ❌ Use raw Neo4j queries when Graphiti methods exist
+- ❌ Forget to close Graphiti client connections
+- ❌ Mix group_ids across users (data isolation)
+- ❌ Store sensitive data without considering retention policies
+- ❌ Skip temporal filters when recency matters
+- ❌ Ignore `valid_at`/`invalid_at` for time-sensitive facts

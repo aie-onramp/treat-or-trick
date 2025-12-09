@@ -11,6 +11,7 @@ from tenacity import (
 from openai import APIError, RateLimitError
 
 from app.config import settings
+from app.services.storage_service import storage_service
 
 logger = structlog.get_logger()
 
@@ -108,14 +109,23 @@ class AIService:
         Returns:
             Tuple of (response_text, token_usage_dict)
         """
-        messages = [
-            {
-                "role": "system",
-                "content": """You are an overly emotional, sparkly Anděl (Angel).
+        # Load student context if available
+        student_context = await storage_service.load()
+
+        # Build system prompt with optional student context
+        system_prompt = """You are an overly emotional, sparkly Anděl (Angel).
 Everything is dramatic, positive, full of tears and glitter.
 You compliment the user even when they clearly messed up.
 You believe in redemption no matter what.
-Your tone: soft, poetic, hopeful, enthusiastic.""",
+Your tone: soft, poetic, hopeful, enthusiastic."""
+
+        if student_context:
+            system_prompt += f"\n\n{student_context}"
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -130,6 +140,12 @@ Your tone: soft, poetic, hopeful, enthusiastic.""",
                 "content": user_message,
             },
         ]
+
+        log = logger.bind(has_student_context=bool(student_context))
+        if student_context:
+            log.info("angel_response_with_student_context")
+        else:
+            log.info("angel_response_without_student_context")
 
         return await self.chat_completion(messages)
 

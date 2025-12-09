@@ -1,0 +1,699 @@
+---
+description: Temporal workflow patterns for durable AI agent execution with determinism constraints
+globs: ["**/workflows/**/*.py", "**/activities/**/*.py", "**/temporal/**/*.py", "**/*_workflow.py", "**/*_activity.py"]
+alwaysApply: false
+---
+
+# Temporal Workflow Standards
+
+## Why Temporal for AI Agents?
+
+AI agent workflows are inherently unreliable: LLM APIs fail, rate limits hit, and long-running operations timeout. Temporal provides **durable execution** - your workflow survives crashes, retries failed operations, and maintains state across restarts.
+
+**Key Benefit**: If an LLM call fails after 3 successful tool calls, Temporal replays from the last successful state, not from the beginning.
+
+## Core Concept: Workflows vs Activities
+
+**CRITICAL RULE**: Separate deterministic orchestration (Workflows) from non-deterministic operations (Activities).
+
+| Component | Purpose | Rules |
+|-----------|---------|-------|
+| **Workflow** | Orchestration logic | MUST be deterministic, NO I/O, NO randomness |
+| **Activity** | Actual work | CAN make API calls, DB queries, LLM requests |
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         WORKFLOW                                 │
+│  (Deterministic orchestration - survives replay)                │
+│                                                                  │
+│   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐        │
+│   │  Activity   │───▶│  Activity   │───▶│  Activity   │        │
+│   │ (LLM Call)  │    │ (DB Query)  │    │ (API Call)  │        │
+│   └─────────────┘    └─────────────┘    └─────────────┘        │
+│                                                                  │
+│   If Activity fails ─▶ Temporal retries ─▶ Workflow continues   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 1. Activity Definitions
+
+Activities contain ALL non-deterministic operations: LLM calls, database queries, HTTP requests, file I/O.
+
+### Basic Activity Pattern
+
+```python
+from temporalio import activity
+from datetime import timedelta
+
+@activity.defn
+async def call_llm(prompt: str, model: str = "gpt-4o") -> str:
+    """Activity that calls LLM API - can be retried by Temporal."""
+    from openai import AsyncOpenAI
+    
+    client = AsyncOpenAI()
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+@activity.defn
+async def save_to_database(data: dict) -> str:
+    """Activity that saves to database."""
+    from app.database import db
+    
+    record_id = await db.insert(data)
+    activity.logger.info(f"Saved record {record_id}")
+    return record_id
+
+@activity.defn
+async def fetch_external_api(url: str) -> dict:
+    """Activity that calls external API."""
+    import httpx
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, timeout=30)
+        return response.json()
+```
+
+### Long-Running Activity with Heartbeat
+
+```python
+@activity.defn
+async def process_large_dataset(dataset_id: str) -> dict:
+    """Long-running activity with heartbeat for cancellation detection."""
+    from app.data import load_dataset, process_chunk
+    
+    dataset = await load_dataset(dataset_id)
+    results = []
+    
+    for i, chunk in enumerate(dataset.chunks()):
+        # Check for cancellation
+        if activity.is_cancelled():
+            activity.logger.warning("Activity cancelled, cleaning up...")
+            raise activity.CancelledError("Processing cancelled")
+        
+        # Send heartbeat with progress
+        activity.heartbeat(f"Processing chunk {i+1}/{len(dataset.chunks())}")
+        
+        result = await process_chunk(chunk)
+        results.append(result)
+    
+    return {"processed": len(results), "dataset_id": dataset_id}
+```
+
+### Synchronous Activity (for CPU-bound work)
+
+```python
+@activity.defn
+def compute_embeddings(texts: list[str]) -> list[list[float]]:
+    """Synchronous activity for CPU-bound embedding computation."""
+    from sentence_transformers import SentenceTransformer
+    
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    embeddings = model.encode(texts)
+    
+    return embeddings.tolist()
+```
+
+---
+
+## 2. Workflow Definitions
+
+Workflows orchestrate activities. They MUST be deterministic - same inputs always produce same execution path.
+
+### Basic Workflow Pattern
+
+```python
+from datetime import timedelta
+from temporalio import workflow
+
+# CRITICAL: Import activities through sandbox passthrough
+with workflow.unsafe.imports_passed_through():
+    from .activities import call_llm, save_to_database
+
+@workflow.defn
+class ProcessQueryWorkflow:
+    """Workflow that processes a user query with LLM."""
+    
+    @workflow.run
+    async def run(self, query: str, user_id: str) -> dict:
+        workflow.logger.info(f"Processing query for user {user_id}")
+        
+        # Execute activity with timeout and retry policy
+        llm_response = await workflow.execute_activity(
+            call_llm,
+            args=[query],
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=workflow.RetryPolicy(
+                initial_interval=timedelta(seconds=1),
+                maximum_interval=timedelta(seconds=30),
+                maximum_attempts=3,
+                backoff_coefficient=2.0
+            )
+        )
+        
+        # Save result
+        record_id = await workflow.execute_activity(
+            save_to_database,
+            args=[{"query": query, "response": llm_response, "user_id": user_id}],
+            start_to_close_timeout=timedelta(seconds=30)
+        )
+        
+        return {"response": llm_response, "record_id": record_id}
+```
+
+### Workflow with Signals and Queries
+
+```python
+import asyncio
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class AgentState:
+    status: str = "pending"
+    current_step: str = ""
+    result: Optional[str] = None
+
+@workflow.defn
+class InteractiveAgentWorkflow:
+    """Workflow with external interaction via signals and queries."""
+    
+    def __init__(self):
+        self._state = AgentState()
+        self._approved = asyncio.Event()
+        self._cancelled = False
+    
+    @workflow.run
+    async def run(self, task: str) -> dict:
+        self._state.status = "analyzing"
+        self._state.current_step = "Initial analysis"
+        
+        # Step 1: Analyze task
+        analysis = await workflow.execute_activity(
+            call_llm,
+            args=[f"Analyze this task: {task}"],
+            start_to_close_timeout=timedelta(minutes=1)
+        )
+        
+        # Step 2: Wait for human approval (with timeout)
+        self._state.status = "awaiting_approval"
+        self._state.current_step = "Waiting for human approval"
+        
+        try:
+            await asyncio.wait_for(
+                self._approved.wait(),
+                timeout=3600  # 1 hour timeout
+            )
+        except asyncio.TimeoutError:
+            self._state.status = "timeout"
+            return {"status": "timeout", "message": "Approval timeout"}
+        
+        if self._cancelled:
+            self._state.status = "cancelled"
+            return {"status": "cancelled"}
+        
+        # Step 3: Execute approved task
+        self._state.status = "executing"
+        result = await workflow.execute_activity(
+            call_llm,
+            args=[f"Execute: {task}\nAnalysis: {analysis}"],
+            start_to_close_timeout=timedelta(minutes=5)
+        )
+        
+        self._state.status = "completed"
+        self._state.result = result
+        return {"status": "completed", "result": result}
+    
+    @workflow.signal
+    async def approve(self):
+        """Signal to approve the pending task."""
+        workflow.logger.info("Approval received")
+        self._approved.set()
+    
+    @workflow.signal
+    async def cancel(self):
+        """Signal to cancel the workflow."""
+        workflow.logger.info("Cancellation received")
+        self._cancelled = True
+        self._approved.set()
+    
+    @workflow.query
+    def get_state(self) -> dict:
+        """Query current workflow state."""
+        return {
+            "status": self._state.status,
+            "current_step": self._state.current_step,
+            "result": self._state.result
+        }
+    
+    @workflow.update
+    def update_task(self, new_task: str) -> str:
+        """Update task description (before execution starts)."""
+        if self._state.status not in ["pending", "analyzing"]:
+            raise ValueError("Cannot update task after analysis")
+        old_task = self._state.current_step
+        return f"Updated from '{old_task}' to '{new_task}'"
+```
+
+---
+
+## 3. PydanticAI + Temporal Integration
+
+PydanticAI natively supports Temporal for durable agent execution.
+
+### Wrap Agent Tools as Activities
+
+```python
+from dataclasses import dataclass
+from temporalio import activity, workflow
+from temporalio.contrib.openai_agents import activity_as_tool
+from pydantic_ai import Agent
+
+# Define activities for agent tools
+@activity.defn
+async def search_knowledge_base(query: str) -> list[dict]:
+    """Activity: Search knowledge base."""
+    from app.knowledge import search
+    return await search(query)
+
+@activity.defn
+async def execute_code(code: str) -> str:
+    """Activity: Execute code in sandbox."""
+    from app.sandbox import run_code
+    return await run_code(code)
+
+# Typed dependencies
+@dataclass
+class AgentDeps:
+    user_id: str
+    session_id: str
+
+@workflow.defn
+class AIAssistantWorkflow:
+    """Durable AI assistant workflow using PydanticAI."""
+    
+    @workflow.run
+    async def run(self, question: str, user_id: str) -> str:
+        from agents import Agent, Runner
+        
+        # Create agent with activities wrapped as tools
+        agent = Agent(
+            name="Assistant",
+            instructions="You are a helpful AI assistant with access to tools.",
+            tools=[
+                activity_as_tool(
+                    search_knowledge_base,
+                    start_to_close_timeout=timedelta(seconds=30)
+                ),
+                activity_as_tool(
+                    execute_code,
+                    start_to_close_timeout=timedelta(minutes=2)
+                )
+            ]
+        )
+        
+        # Run agent - all tool calls are durable activities
+        result = await Runner.run(
+            starting_agent=agent,
+            input=question
+        )
+        
+        return result.final_output
+```
+
+### Full PydanticAI Agent Workflow
+
+```python
+from pydantic import BaseModel
+from pydantic_ai import Agent, RunContext
+
+class TaskResult(BaseModel):
+    answer: str
+    sources: list[str]
+    confidence: float
+
+@dataclass
+class ResearchDeps:
+    graphiti_client: Any  # Graphiti instance
+    user_id: str
+
+# Create typed agent
+research_agent = Agent(
+    'gpt-4o',
+    deps_type=ResearchDeps,
+    output_type=TaskResult,
+    system_prompt="You are a research assistant. Search knowledge and provide sourced answers."
+)
+
+@research_agent.tool
+async def search_memory(ctx: RunContext[ResearchDeps], query: str) -> str:
+    """Search the knowledge graph for relevant information."""
+    results = await ctx.deps.graphiti_client.search(
+        query=query,
+        group_ids=[ctx.deps.user_id],
+        num_results=5
+    )
+    return "\n".join([edge.fact for edge in results])
+
+# Wrap as Temporal workflow
+@workflow.defn
+class ResearchWorkflow:
+    @workflow.run
+    async def run(self, question: str, user_id: str) -> dict:
+        # Activity for the actual agent execution
+        result = await workflow.execute_activity(
+            run_research_agent,
+            args=[question, user_id],
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=30)
+        )
+        return result
+
+@activity.defn
+async def run_research_agent(question: str, user_id: str) -> dict:
+    """Activity that runs the PydanticAI agent."""
+    from app.clients import get_graphiti_client
+    
+    graphiti = await get_graphiti_client()
+    deps = ResearchDeps(graphiti_client=graphiti, user_id=user_id)
+    
+    result = await research_agent.run(question, deps=deps)
+    
+    return {
+        "answer": result.data.answer,
+        "sources": result.data.sources,
+        "confidence": result.data.confidence
+    }
+```
+
+---
+
+## 4. Safe Versioning with `workflow.patched`
+
+When updating workflow logic in production, use `workflow.patched` to ensure existing executions replay correctly.
+
+```python
+@workflow.defn
+class EvolvingWorkflow:
+    @workflow.run
+    async def run(self, data: str) -> str:
+        # Version 1: Original validation
+        if workflow.patched("v2-enhanced-validation"):
+            # Version 2: New enhanced validation
+            validated = await workflow.execute_activity(
+                enhanced_validate,
+                args=[data],
+                start_to_close_timeout=timedelta(seconds=30)
+            )
+        else:
+            # Version 1: Old validation (for replaying existing executions)
+            validated = await workflow.execute_activity(
+                basic_validate,
+                args=[data],
+                start_to_close_timeout=timedelta(seconds=30)
+            )
+        
+        # Version 2: Add new preprocessing step
+        if workflow.patched("v2-add-preprocessing"):
+            data = await workflow.execute_activity(
+                preprocess_data,
+                args=[validated],
+                start_to_close_timeout=timedelta(seconds=30)
+            )
+        
+        # Common processing (exists in all versions)
+        result = await workflow.execute_activity(
+            process_data,
+            args=[data if workflow.patched("v2-add-preprocessing") else validated],
+            start_to_close_timeout=timedelta(minutes=2)
+        )
+        
+        return result
+```
+
+---
+
+## 5. Long-Running Workflows with Continue-As-New
+
+Prevent history growth for workflows that run indefinitely.
+
+```python
+@workflow.defn
+class ContinuousProcessorWorkflow:
+    @workflow.run
+    async def run(self, start_position: int, iteration_count: int = 0) -> str:
+        current_position = start_position
+        
+        # Process in batches
+        for i in range(100):  # 100 iterations per execution
+            result = await workflow.execute_activity(
+                process_batch,
+                args=[current_position],
+                start_to_close_timeout=timedelta(minutes=1)
+            )
+            current_position = result["next_position"]
+            iteration_count += 1
+            
+            workflow.logger.info(f"Processed batch {iteration_count}")
+        
+        # Continue as new to prevent history growth
+        workflow.logger.info(f"Continuing from position {current_position}")
+        workflow.continue_as_new(current_position, iteration_count)
+        
+        # Code after continue_as_new never executes
+        return "unreachable"
+```
+
+---
+
+## 6. Worker Setup
+
+### Worker Configuration
+
+```python
+import asyncio
+from temporalio.client import Client
+from temporalio.worker import Worker
+from concurrent.futures import ThreadPoolExecutor
+
+from .workflows import ProcessQueryWorkflow, AIAssistantWorkflow
+from .activities import call_llm, save_to_database, search_knowledge_base
+
+async def run_worker():
+    # Connect to Temporal server
+    client = await Client.connect("localhost:7233")
+    
+    # Create worker with thread pool for sync activities
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        worker = Worker(
+            client,
+            task_queue="ai-agents",
+            workflows=[
+                ProcessQueryWorkflow,
+                AIAssistantWorkflow,
+            ],
+            activities=[
+                call_llm,
+                save_to_database,
+                search_knowledge_base,
+            ],
+            activity_executor=executor,
+        )
+        
+        print("Worker started on task queue 'ai-agents'")
+        await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(run_worker())
+```
+
+### Pydantic Data Converter
+
+```python
+from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
+
+async def get_temporal_client():
+    """Get Temporal client with Pydantic support."""
+    return await Client.connect(
+        "localhost:7233",
+        data_converter=pydantic_data_converter
+    )
+```
+
+---
+
+## 7. Testing Temporal Workflows
+
+### Time-Skipping Tests
+
+```python
+import pytest
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
+
+class TestWorkflows:
+    async def test_query_workflow_success(self):
+        """Test workflow completes successfully."""
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(
+                env.client,
+                task_queue="test",
+                workflows=[ProcessQueryWorkflow],
+                activities=[call_llm, save_to_database]
+            ):
+                result = await env.client.execute_workflow(
+                    ProcessQueryWorkflow.run,
+                    args=["What is AI?", "user-123"],
+                    id="test-workflow-1",
+                    task_queue="test"
+                )
+                
+                assert "response" in result
+                assert "record_id" in result
+    
+    async def test_workflow_with_mocked_activity(self):
+        """Test workflow with mocked activity."""
+        @activity.defn
+        async def mock_call_llm(prompt: str) -> str:
+            return "Mocked LLM response"
+        
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(
+                env.client,
+                task_queue="test",
+                workflows=[ProcessQueryWorkflow],
+                activities=[mock_call_llm, save_to_database]  # Use mock
+            ):
+                result = await env.client.execute_workflow(
+                    ProcessQueryWorkflow.run,
+                    args=["Test query", "user-123"],
+                    id="test-workflow-2",
+                    task_queue="test"
+                )
+                
+                assert result["response"] == "Mocked LLM response"
+```
+
+---
+
+## DETERMINISM RULES (CRITICAL)
+
+### ✅ ALLOWED in Workflows
+
+```python
+@workflow.defn
+class ValidWorkflow:
+    @workflow.run
+    async def run(self, data: str) -> str:
+        # ✅ Execute activities
+        result = await workflow.execute_activity(my_activity, data, ...)
+        
+        # ✅ Use workflow.now() for time
+        current_time = workflow.now()
+        
+        # ✅ Sleep with asyncio.sleep (Temporal intercepts)
+        await asyncio.sleep(3600)  # 1 hour - Temporal handles this
+        
+        # ✅ Conditional logic based on inputs
+        if len(data) > 100:
+            result = await workflow.execute_activity(...)
+        
+        # ✅ Use workflow.random() for randomness
+        random_value = workflow.random().random()
+        
+        return result
+```
+
+### ❌ FORBIDDEN in Workflows
+
+```python
+@workflow.defn
+class InvalidWorkflow:
+    @workflow.run
+    async def run(self, data: str) -> str:
+        # ❌ NEVER: Direct I/O
+        with open("file.txt") as f:
+            content = f.read()
+        
+        # ❌ NEVER: HTTP requests
+        response = requests.get("https://api.example.com")
+        
+        # ❌ NEVER: Database queries
+        result = await db.query("SELECT * FROM users")
+        
+        # ❌ NEVER: datetime.now() - non-deterministic
+        current_time = datetime.now()
+        
+        # ❌ NEVER: random.random() - non-deterministic
+        value = random.random()
+        
+        # ❌ NEVER: LLM calls directly
+        response = await openai_client.chat.completions.create(...)
+        
+        # ❌ NEVER: time.sleep() - blocks worker
+        time.sleep(10)
+```
+
+### Passthrough for Pydantic Models
+
+```python
+from temporalio import workflow
+
+# Pass Pydantic through sandbox to avoid reimport issues
+with workflow.unsafe.imports_passed_through():
+    import pydantic
+    from app.models import UserRequest, TaskResult
+    from app.activities import process_user_request
+
+@workflow.defn
+class TypedWorkflow:
+    @workflow.run
+    async def run(self, request: UserRequest) -> TaskResult:
+        # request is a Pydantic model - works because of passthrough
+        result = await workflow.execute_activity(
+            process_user_request,
+            request,
+            start_to_close_timeout=timedelta(minutes=1)
+        )
+        return TaskResult(**result)
+```
+
+---
+
+## Project Structure
+
+```
+app/
+├── temporal/
+│   ├── __init__.py
+│   ├── workflows/
+│   │   ├── __init__.py
+│   │   ├── agent_workflow.py
+│   │   └── research_workflow.py
+│   ├── activities/
+│   │   ├── __init__.py
+│   │   ├── llm_activities.py
+│   │   ├── database_activities.py
+│   │   └── external_activities.py
+│   ├── worker.py
+│   └── client.py
+└── ...
+```
+
+---
+
+## DO NOT
+
+- ❌ Put I/O operations directly in workflows
+- ❌ Use `datetime.now()` in workflows (use `workflow.now()`)
+- ❌ Use `random.random()` in workflows (use `workflow.random()`)
+- ❌ Use `time.sleep()` in workflows (use `asyncio.sleep()`)
+- ❌ Import activities without `workflow.unsafe.imports_passed_through()`
+- ❌ Forget heartbeats in long-running activities
+- ❌ Skip retry policies for external API calls
+- ❌ Let workflow history grow unbounded (use continue-as-new)

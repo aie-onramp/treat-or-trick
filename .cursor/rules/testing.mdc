@@ -1,0 +1,665 @@
+---
+description: Testing standards for FastAPI, PydanticAI agents, MCP servers, and Graphiti knowledge graphs
+globs: ["**/tests/**/*.py", "**/*_test.py", "**/test_*.py", "**/conftest.py"]
+alwaysApply: false
+---
+
+# Testing Standards
+
+## Core Philosophy
+
+- **Unit Tests**: Test logic in isolation (Pydantic models, utility functions, validators)
+- **Integration Tests**: Test database interactions, API endpoints, external services
+- **E2E Tests**: Test MCP tools, agent workflows, and knowledge graph operations
+- **Property-Based Tests**: Test Pydantic model invariants with Hypothesis
+
+## Required Stack
+
+```toml
+# pyproject.toml - REQUIRED configuration
+[tool.pytest.ini_options]
+asyncio_mode = "auto"  # Eliminates @pytest.mark.asyncio decorators
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests as integration tests",
+    "e2e: marks tests as end-to-end tests",
+    "slow: marks tests as slow running",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.0",
+    "respx>=0.21",        # HTTP mocking
+    "dirty-equals>=0.7",  # Flexible assertions
+    "inline-snapshot>=0.10",  # Snapshot testing
+]
+```
+
+## Environment Guard
+
+**CRITICAL**: Block accidental LLM API calls in tests.
+
+```python
+# conftest.py - ADD THIS FIRST
+import os
+import pytest
+
+# Block real model requests globally
+os.environ["ALLOW_MODEL_REQUESTS"] = "False"
+
+@pytest.fixture(autouse=True)
+def reset_environment():
+    """Ensure test isolation."""
+    original_env = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(original_env)
+```
+
+---
+
+## 1. Testing Pydantic Models
+
+**Rule**: Do NOT test Pydantic's built-in validation. Test YOUR custom validators and computed fields.
+
+### Custom Validator Tests
+
+```python
+import pytest
+from pydantic import ValidationError
+from app.models import User, Order
+
+class TestUserModel:
+    """Test custom User model validators."""
+    
+    def test_email_normalized_to_lowercase(self):
+        """Custom validator lowercases email."""
+        user = User(email="JOHN@EXAMPLE.COM", name="John")
+        assert user.email == "john@example.com"
+    
+    def test_age_within_valid_range(self):
+        """Custom validator enforces age constraints."""
+        user = User(email="test@test.com", name="Test", age=25)
+        assert user.age == 25
+        
+        with pytest.raises(ValidationError) as exc_info:
+            User(email="test@test.com", name="Test", age=150)
+        assert "age" in str(exc_info.value)
+    
+    def test_computed_field_full_name(self):
+        """Test computed property works correctly."""
+        user = User(email="test@test.com", first_name="John", last_name="Doe")
+        assert user.full_name == "John Doe"
+```
+
+### Property-Based Testing with Hypothesis
+
+```python
+from hypothesis import given, strategies as st
+from app.models import Product
+
+class TestProductModelProperties:
+    """Property-based tests for Product model invariants."""
+    
+    @given(
+        name=st.text(min_size=1, max_size=100),
+        price=st.floats(min_value=0.01, max_value=10000, allow_nan=False),
+        quantity=st.integers(min_value=0, max_value=10000)
+    )
+    def test_product_total_always_non_negative(self, name, price, quantity):
+        """Product total is always >= 0 regardless of inputs."""
+        product = Product(name=name, price=price, quantity=quantity)
+        assert product.total >= 0
+    
+    @given(st.builds(Product))
+    def test_product_serialization_roundtrip(self, product):
+        """Product survives JSON serialization roundtrip."""
+        json_data = product.model_dump_json()
+        restored = Product.model_validate_json(json_data)
+        assert restored == product
+```
+
+---
+
+## 2. Testing FastAPI Endpoints
+
+### Basic Endpoint Tests
+
+```python
+import pytest
+from httpx import AsyncClient, ASGITransport
+from app.main import app
+
+@pytest.fixture
+async def client():
+    """Async test client for FastAPI app."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+class TestItemsAPI:
+    """Test /items endpoints."""
+    
+    async def test_create_item_success(self, client: AsyncClient):
+        response = await client.post(
+            "/items/",
+            json={"name": "Test Item", "price": 29.99}
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "Test Item"
+        assert "id" in data
+    
+    async def test_create_item_validation_error(self, client: AsyncClient):
+        response = await client.post(
+            "/items/",
+            json={"name": "", "price": -10}  # Invalid
+        )
+        assert response.status_code == 422
+        errors = response.json()["detail"]
+        assert any("name" in str(e) for e in errors)
+```
+
+### Dependency Override Pattern
+
+```python
+from app.dependencies import get_database
+from unittest.mock import AsyncMock
+
+@pytest.fixture
+def mock_database():
+    """Mock database dependency."""
+    mock_db = AsyncMock()
+    mock_db.get_item.return_value = {"id": 1, "name": "Mocked"}
+    return mock_db
+
+@pytest.fixture
+async def client_with_mock_db(mock_database):
+    """Client with mocked database."""
+    app.dependency_overrides[get_database] = lambda: mock_database
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+```
+
+---
+
+## 3. Testing PydanticAI Agents
+
+### TestModel Pattern - No LLM Calls
+
+**CRITICAL**: Use `TestModel` or `FunctionModel` to test agent logic without API calls.
+
+```python
+import pytest
+from pydantic_ai import Agent
+from pydantic_ai.models.test import TestModel
+from app.agents import support_agent, SupportResponse
+
+class TestSupportAgent:
+    """Test support agent without LLM calls."""
+    
+    async def test_agent_returns_structured_response(self):
+        """Agent produces valid SupportResponse."""
+        # TestModel returns predefined responses
+        with support_agent.override(model=TestModel()):
+            result = await support_agent.run("Help me with my order")
+            
+            assert isinstance(result.data, SupportResponse)
+            assert result.data.category in ["billing", "technical", "general"]
+    
+    async def test_agent_tool_is_called(self):
+        """Verify agent calls expected tools."""
+        with support_agent.override(model=TestModel()) as agent:
+            result = await agent.run("Check order status for #12345")
+            
+            # Access tool call history
+            messages = result.all_messages()
+            tool_calls = [m for m in messages if m.kind == "tool-call"]
+            assert any("check_order" in str(tc) for tc in tool_calls)
+```
+
+### FunctionModel for Controlled Responses
+
+```python
+from pydantic_ai.models.function import FunctionModel
+
+def mock_llm_response(messages, info):
+    """Controlled mock LLM that returns predictable responses."""
+    user_msg = next((m for m in messages if m.kind == "user"), None)
+    
+    if "refund" in str(user_msg).lower():
+        return "I'll help you process a refund. Processing now..."
+    return "How can I assist you today?"
+
+class TestAgentWithFunctionModel:
+    async def test_refund_flow(self):
+        """Test specific conversation flows."""
+        with support_agent.override(model=FunctionModel(mock_llm_response)):
+            result = await support_agent.run("I need a refund")
+            assert "refund" in result.data.response.lower()
+```
+
+### Testing Agent Tools
+
+```python
+from dataclasses import dataclass
+from pydantic_ai import Agent, RunContext
+from unittest.mock import AsyncMock
+
+@dataclass
+class AgentDeps:
+    db: AsyncMock
+    user_id: str
+
+@pytest.fixture
+def mock_deps():
+    """Create mock dependencies for agent."""
+    return AgentDeps(
+        db=AsyncMock(),
+        user_id="test-user-123"
+    )
+
+class TestAgentTools:
+    async def test_tool_receives_typed_deps(self, mock_deps):
+        """Tool function receives properly typed dependencies."""
+        mock_deps.db.get_user_orders.return_value = [
+            {"id": 1, "status": "shipped"}
+        ]
+        
+        agent = Agent("test", deps_type=AgentDeps)
+        
+        @agent.tool
+        async def get_orders(ctx: RunContext[AgentDeps]) -> list[dict]:
+            # ctx.deps is fully typed!
+            return await ctx.deps.db.get_user_orders(ctx.deps.user_id)
+        
+        with agent.override(model=TestModel()):
+            result = await agent.run("Show my orders", deps=mock_deps)
+            mock_deps.db.get_user_orders.assert_called_once_with("test-user-123")
+```
+
+### Agent.override for Integration Tests
+
+```python
+class TestAgentOverride:
+    """Test agent behavior with different configurations."""
+    
+    async def test_override_model_and_deps(self, mock_deps):
+        """Override both model and dependencies."""
+        with support_agent.override(
+            model=TestModel(),
+            deps=mock_deps
+        ) as test_agent:
+            result = await test_agent.run("Test query")
+            assert result.data is not None
+    
+    async def test_capture_run_messages(self):
+        """Capture all messages for debugging."""
+        with support_agent.override(model=TestModel()) as test_agent:
+            result = await test_agent.run("Debug this flow")
+            
+            # Inspect conversation history
+            for msg in result.all_messages():
+                print(f"{msg.kind}: {msg}")
+```
+
+---
+
+## 4. Testing FastMCP Servers
+
+### Client-Based Testing (Recommended)
+
+```python
+import pytest
+from fastmcp import FastMCP, Client
+
+# Your MCP server
+mcp = FastMCP("test-server")
+
+@mcp.tool()
+def add_numbers(a: int, b: int) -> int:
+    """Add two numbers."""
+    return a + b
+
+@mcp.resource("config://settings")
+def get_settings() -> dict:
+    """Get application settings."""
+    return {"version": "1.0", "debug": True}
+
+class TestMCPServer:
+    """Test MCP server using Client."""
+    
+    @pytest.fixture
+    async def client(self):
+        """Create test client connected to server."""
+        async with Client(mcp) as client:
+            yield client
+    
+    async def test_tool_execution(self, client: Client):
+        """Test tool returns expected result."""
+        result = await client.call_tool("add_numbers", {"a": 5, "b": 3})
+        assert result == 8
+    
+    async def test_resource_retrieval(self, client: Client):
+        """Test resource returns expected data."""
+        result = await client.read_resource("config://settings")
+        assert result["version"] == "1.0"
+    
+    async def test_list_tools(self, client: Client):
+        """Verify tools are registered."""
+        tools = await client.list_tools()
+        tool_names = [t.name for t in tools]
+        assert "add_numbers" in tool_names
+```
+
+### Mocking Context for Unit Tests
+
+```python
+from fastmcp import Context
+from unittest.mock import AsyncMock, MagicMock
+
+@pytest.fixture
+def mock_context():
+    """Create mock MCP Context."""
+    ctx = MagicMock(spec=Context)
+    ctx.info = MagicMock()
+    ctx.warning = MagicMock()
+    ctx.error = MagicMock()
+    ctx.report_progress = AsyncMock()
+    return ctx
+
+class TestMCPToolsUnit:
+    """Unit test MCP tools with mocked context."""
+    
+    async def test_tool_logs_progress(self, mock_context):
+        """Verify tool reports progress correctly."""
+        from app.mcp_server import process_data
+        
+        result = await process_data(data="test", ctx=mock_context)
+        
+        mock_context.info.assert_called()
+        mock_context.report_progress.assert_called()
+        assert result["status"] == "success"
+    
+    async def test_tool_handles_errors(self, mock_context):
+        """Verify tool handles errors gracefully."""
+        from app.mcp_server import process_data
+        
+        result = await process_data(data=None, ctx=mock_context)
+        
+        mock_context.error.assert_called_with("Invalid data provided")
+        assert result["status"] == "error"
+```
+
+### Testing MCP with External Dependencies
+
+```python
+from unittest.mock import patch, AsyncMock
+
+class TestMCPWithDependencies:
+    """Test MCP tools that have external dependencies."""
+    
+    async def test_tool_with_mocked_database(self, client: Client):
+        """Test tool with mocked database."""
+        mock_db = AsyncMock()
+        mock_db.query.return_value = [{"id": 1, "name": "Test"}]
+        
+        with patch("app.mcp_server.database", mock_db):
+            result = await client.call_tool("search_records", {"query": "test"})
+            
+            assert len(result) == 1
+            mock_db.query.assert_called_once()
+    
+    async def test_tool_with_mocked_http(self, client: Client):
+        """Test tool that makes HTTP requests."""
+        import respx
+        
+        with respx.mock:
+            respx.get("https://api.example.com/data").respond(
+                json={"status": "ok"}
+            )
+            
+            result = await client.call_tool("fetch_external_data", {})
+            assert result["status"] == "ok"
+```
+
+---
+
+## 5. Testing Graphiti Knowledge Graphs
+
+### Setup Test Graph Instance
+
+```python
+import pytest
+from graphiti_core import Graphiti
+from datetime import datetime, timezone
+
+@pytest.fixture
+async def test_graphiti():
+    """Create isolated test Graphiti instance."""
+    # Use test-specific database or namespace
+    graphiti = Graphiti(
+        uri="bolt://localhost:7687",
+        user="neo4j",
+        password="testpassword"
+    )
+    
+    await graphiti.build_indices_and_constraints()
+    
+    yield graphiti
+    
+    # Cleanup: Remove test data
+    # await cleanup_test_data(graphiti, group_id="test-group")
+    await graphiti.close()
+
+async def cleanup_test_data(graphiti: Graphiti, group_id: str):
+    """Remove all test data from graph."""
+    # Implementation depends on your cleanup strategy
+    pass
+```
+
+### Testing Episode Ingestion
+
+```python
+from graphiti_core.nodes import EpisodeType
+
+class TestGraphitiIngestion:
+    """Test knowledge graph ingestion."""
+    
+    async def test_add_episode_extracts_entities(self, test_graphiti):
+        """Episode ingestion extracts expected entities."""
+        result = await test_graphiti.add_episode(
+            name="Test Conversation",
+            episode_body="Alice works at Acme Corp as a software engineer.",
+            source=EpisodeType.text,
+            source_description="Test input",
+            reference_time=datetime.now(timezone.utc),
+            group_id="test-group"
+        )
+        
+        # Verify entities extracted
+        entity_names = [node.name for node in result.nodes]
+        assert "Alice" in entity_names
+        assert "Acme Corp" in entity_names
+        
+        # Verify relationship created
+        assert len(result.edges) > 0
+        edge_facts = [edge.fact for edge in result.edges]
+        assert any("works" in fact.lower() for fact in edge_facts)
+    
+    async def test_add_episode_with_custom_entities(self, test_graphiti):
+        """Test custom entity type extraction."""
+        from pydantic import BaseModel
+        
+        class Product(BaseModel):
+            name: str
+            category: str
+        
+        result = await test_graphiti.add_episode(
+            name="Product Info",
+            episode_body="MacBook Pro is a laptop in the Electronics category priced at $2499",
+            source=EpisodeType.text,
+            source_description="Product data",
+            reference_time=datetime.now(timezone.utc),
+            group_id="test-group",
+            entity_types={"Product": Product}
+        )
+        
+        # Verify custom entity extracted
+        product_nodes = [n for n in result.nodes if "Product" in n.labels]
+        assert len(product_nodes) > 0
+```
+
+### Testing Graph Queries
+
+```python
+class TestGraphitiQueries:
+    """Test knowledge graph search and retrieval."""
+    
+    async def test_semantic_search(self, test_graphiti):
+        """Test semantic search returns relevant facts."""
+        # First, add some data
+        await test_graphiti.add_episode(
+            name="Setup",
+            episode_body="John is a senior engineer who leads the API team.",
+            source=EpisodeType.text,
+            reference_time=datetime.now(timezone.utc),
+            group_id="test-group"
+        )
+        
+        # Search
+        results = await test_graphiti.search(
+            query="Who works on APIs?",
+            group_ids=["test-group"],
+            num_results=5
+        )
+        
+        assert len(results) > 0
+        assert any("John" in edge.fact for edge in results)
+    
+    async def test_search_with_filters(self, test_graphiti):
+        """Test filtered search narrows results."""
+        from datetime import timedelta
+        from graphiti_core.search.search_filters import SearchFilters
+        
+        now = datetime.now(timezone.utc)
+        
+        search_filter = SearchFilters(
+            valid_after=now - timedelta(days=1),
+            valid_before=now,
+            entity_labels=["Person"]
+        )
+        
+        results = await test_graphiti.search(
+            query="engineers",
+            group_ids=["test-group"],
+            num_results=10,
+            search_filter=search_filter
+        )
+        
+        # All results should be from last 24 hours
+        for edge in results:
+            if edge.valid_at:
+                assert edge.valid_at >= now - timedelta(days=1)
+```
+
+### Mocking Graphiti for Unit Tests
+
+```python
+from unittest.mock import AsyncMock, MagicMock
+
+@pytest.fixture
+def mock_graphiti():
+    """Create mock Graphiti client."""
+    mock = AsyncMock(spec=Graphiti)
+    
+    # Mock search results
+    mock_edge = MagicMock()
+    mock_edge.fact = "Alice works at Acme Corp"
+    mock_edge.uuid = "test-uuid"
+    mock.search.return_value = [mock_edge]
+    
+    return mock
+
+class TestWithMockedGraphiti:
+    """Test components that use Graphiti."""
+    
+    async def test_memory_tool_searches_graph(self, mock_graphiti):
+        """Memory tool calls Graphiti search."""
+        from app.tools import recall_memory
+        
+        result = await recall_memory(
+            query="Where does Alice work?",
+            graphiti=mock_graphiti
+        )
+        
+        mock_graphiti.search.assert_called_once()
+        assert "Acme Corp" in result
+```
+
+---
+
+## 6. Test Organization
+
+### Directory Structure
+
+```
+tests/
+├── conftest.py              # Shared fixtures, env guards
+├── unit/
+│   ├── test_models.py       # Pydantic model tests
+│   ├── test_validators.py   # Custom validator tests
+│   └── test_utils.py        # Utility function tests
+├── integration/
+│   ├── test_api.py          # FastAPI endpoint tests
+│   ├── test_database.py     # Database interaction tests
+│   └── test_external.py     # External service tests
+├── e2e/
+│   ├── test_agents.py       # PydanticAI agent workflows
+│   ├── test_mcp.py          # MCP server tests
+│   └── test_graphiti.py     # Knowledge graph tests
+└── fixtures/
+    ├── sample_data.json     # Test data
+    └── mock_responses.py    # Reusable mock responses
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=app --cov-report=html
+
+# Run only unit tests
+uv run pytest tests/unit/
+
+# Run only integration tests (may require services)
+uv run pytest -m integration
+
+# Skip slow tests
+uv run pytest -m "not slow"
+
+# Run specific test file
+uv run pytest tests/e2e/test_agents.py -v
+```
+
+---
+
+## DO NOT
+
+- ❌ Test Pydantic's built-in validation (it's already tested)
+- ❌ Make real LLM API calls in tests (use TestModel/FunctionModel)
+- ❌ Skip the `ALLOW_MODEL_REQUESTS=False` guard
+- ❌ Write tests without async fixtures for async code
+- ❌ Ignore test isolation (each test should be independent)
+- ❌ Mock everything (some integration tests need real behavior)
+- ❌ Write only happy-path tests (test error cases too)

@@ -2,11 +2,12 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import chat, meta
+from app.api.v1 import chat, meta, questions
 
 api_router = APIRouter()
 
 api_router.include_router(meta.router)
 api_router.include_router(chat.router)
+api_router.include_router(questions.router)
 
 
