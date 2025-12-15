@@ -15,5 +15,6 @@ dependencies = [
     "structlog>=24.0.0",
     "tenacity>=8.0.0",
     "upstash-redis>=1.5.0",
+    "requests>=2.32.5",
 ]
 
