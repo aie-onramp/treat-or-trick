@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # OpenAI Configuration
     openai_api_key: str
-    openai_model: str = "gpt-5-nano"
+    openai_model: str = "gpt-4o-mini"
     openai_max_tokens: int = 1000
     openai_temperature: float = 0.7
 
